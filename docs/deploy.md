@@ -1,0 +1,144 @@
+# Deploying
+
+From an empty directory to a working Tracecat login screen.
+
+---
+
+## 1. Check your prerequisites
+
+```bash
+aws sts get-caller-identity     # credentials work, and you know which account
+terraform version               # 1.6 or newer
+curl -s https://checkip.amazonaws.com   # your public address, for allowed_cidrs
+```
+
+You need permission to create EC2 instances, VPC security groups, IAM roles and
+instance profiles, and Elastic IPs. The IAM role this creates grants only
+`AmazonSSMManagedInstanceCore`, which is what makes shell access work without SSH.
+
+If your account has no default VPC, have a `vpc_id` and a **public** `subnet_id` ready —
+the subnet must route to an internet gateway, since the instance pulls container images
+on first boot.
+
+## 2. Configure
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Two variables are required and have no defaults:
+
+```hcl
+allowed_cidrs    = ["203.0.113.42/32"]   # who may reach the UI
+superadmin_email = "you@example.com"     # your Tracecat account
+```
+
+`allowed_cidrs` rejects `0.0.0.0/0` through a variable validation. That is deliberate:
+this deployment serves unencrypted HTTP, and Tracecat's documentation warns against
+exposing an HTTP-only instance publicly. If you genuinely want it open, put TLS in front
+first and then edit the rule knowingly.
+
+Worth knowing about the rest:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `instance_type` | `t3.xlarge` | `t3.large` works but is tight for ~15 containers |
+| `root_volume_size` | `60` | Minimum 40; the images alone are several GB |
+| `allocate_eip` | `true` | Keep it — see below |
+| `enable_ssh` | `false` | SSM Session Manager already gives you a shell |
+| `tracecat_version` | `1.0.0` | The git tag the bootstrap fetches from |
+| `app_hostname` | `null` | Set only once DNS already points at the instance |
+
+**Why the Elastic IP matters.** Tracecat writes its public URL into `.env` at first boot
+and validates browser origins against it. Without a stable address, stopping and starting
+the instance changes the IP and breaks the UI until you regenerate that file. Terraform
+allocates the EIP *before* the instance so the address can be baked into the boot
+configuration, rather than racing the association.
+
+## 3. Apply
+
+```bash
+terraform init
+terraform plan       # read it — the security group rules and IAM role are the parts to check
+terraform apply
+```
+
+`apply` returns when the **instance** is running. Tracecat is not ready yet.
+
+## 4. Watch the install
+
+The bootstrap takes **5–15 minutes**: installing Docker, pulling ~15 images, running
+database migrations, and waiting for the UI to answer.
+
+```bash
+terraform output watch_bootstrap_command
+```
+
+Run what it prints, or open a shell and tail the log directly:
+
+```bash
+aws ssm start-session --target $(terraform output -raw instance_id)
+sudo tail -f /var/log/tracecat-bootstrap.log
+```
+
+You are looking for this, at the end:
+
+```
+[2026-08-21T22:41:07Z] === Tracecat is up at http://203.0.113.42 ===
+```
+
+The script also writes `/etc/tracecat/READY` on success. If that file does not exist, the
+install did not finish — the log will say why, and
+[troubleshooting.md](troubleshooting.md) covers the likely causes.
+
+> **If SSM will not connect**, give it a minute — the agent registers shortly after boot.
+> It also needs the instance to reach the SSM endpoints, which it does through the
+> internet gateway. If your subnet has no route out, SSM will never come up and neither
+> will the Docker install.
+
+## 5. First login
+
+```bash
+terraform output app_url
+```
+
+Open it. You get Tracecat's sign-in page.
+
+**There is no default password.** The address you set as `superadmin_email` is registered
+as the first user, and you claim the account by signing up with that exact address and
+choosing a password. Sign in with anything else and you get an ordinary unprivileged
+account.
+
+Also available:
+
+- `http://<ip>/api/docs` — the API reference
+- `http://<ip>/mcp` — the MCP endpoint
+
+## 6. Back up the secrets, now
+
+```bash
+aws ssm start-session --target $(terraform output -raw instance_id)
+sudo cat /opt/tracecat/.env
+```
+
+Four values in that file are unrecoverable if lost:
+`TRACECAT__SERVICE_KEY`, `TRACECAT__SIGNING_SECRET`, `TRACECAT__DB_ENCRYPTION_KEY`,
+`USER_AUTH_SECRET`. They were generated on the instance and exist nowhere else — not in
+Terraform state, not in this repository. Losing them means losing every stored credential
+and every webhook.
+
+Copy them somewhere safe before you do anything else with the instance. See
+[operations.md](operations.md#backups).
+
+---
+
+## Tearing down
+
+```bash
+terraform destroy
+```
+
+Removes the instance, the volume, the Elastic IP, the security group and the IAM role.
+Nothing persists — including the Tracecat database. Take a backup first if you care about
+what is in it.

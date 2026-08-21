@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars and fill in.
+#
+#   curl -s https://checkip.amazonaws.com     → your public address
+
+# Required. Who may reach the UI. This deployment serves plain HTTP, so
+# 0.0.0.0/0 is rejected by a variable validation rather than merely discouraged.
+allowed_cidrs = ["203.0.113.42/32"]
+
+# Required. You sign up with this address on first visit.
+superadmin_email = "you@example.com"
+
+aws_region    = "us-east-1"
+instance_type = "t3.xlarge"
+
+# Optional: use an existing VPC and public subnet instead of the default VPC.
+# vpc_id    = "vpc-0123456789abcdef0"
+# subnet_id = "subnet-0123456789abcdef0"
+
+# Optional: SSH in addition to SSM Session Manager.
+# enable_ssh = true
+# key_name   = "my-keypair"
+
+# Optional: serve on a hostname instead of the raw IP. Point DNS at the
+# Elastic IP first — Tracecat bakes this into PUBLIC_APP_URL at first boot.
+# app_hostname = "tracecat.example.com"

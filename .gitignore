@@ -1,0 +1,26 @@
+# Terraform state holds resource IDs, IP addresses and anything marked sensitive.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# Your inputs, including allowed_cidrs and your email.
+*.tfvars
+!*.tfvars.example
+*.tfvars.json
+
+# Never commit these. Tracecat's secrets live in .env ON THE INSTANCE, not here,
+# but if you ever pull a copy down for backup, keep it out of git.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

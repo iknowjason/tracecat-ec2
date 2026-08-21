@@ -1,0 +1,32 @@
+#cloud-config
+# Tracecat unattended install.
+#
+# cloud-init writes the configuration and the bootstrap script, then runs it.
+# The script itself is passed base64-encoded so that nothing inside it is
+# interpreted by Terraform's template engine — bash's $${VAR} syntax and
+# Terraform's $${...} interpolation would otherwise collide.
+
+package_update: true
+
+write_files:
+  - path: /etc/tracecat/deploy.env
+    permissions: "0640"
+    owner: root:root
+    content: |
+      TRACECAT_VERSION=${tracecat_version}
+      SUPERADMIN_EMAIL=${superadmin_email}
+      APP_HOST=${app_host}
+      INSTALL_DIR=/opt/tracecat
+      PRODUCTION_MODE=y
+      POSTGRES_SSL=n
+
+  - path: /usr/local/sbin/tracecat-bootstrap.sh
+    permissions: "0750"
+    owner: root:root
+    encoding: b64
+    content: ${bootstrap_b64}
+
+runcmd:
+  - [ /usr/local/sbin/tracecat-bootstrap.sh ]
+
+final_message: "cloud-init finished after $UPTIME seconds. Check /var/log/tracecat-bootstrap.log and /etc/tracecat/READY."
