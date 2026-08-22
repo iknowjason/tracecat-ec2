@@ -43,6 +43,26 @@ That reference creates the dependency `aws_eip → aws_instance`, and the associ
 happens afterwards. When `allocate_eip` is false, `app_host` is empty and the bootstrap
 falls back to asking instance metadata — correct, just not stable across a stop/start.
 
+### What the bootstrap does with instance metadata
+
+The IMDSv2 query runs on **every** path, not only the fallback, because it is the one
+source of truth for the address this instance actually answers on:
+
+| `APP_HOST` from Terraform | What happens |
+|---|---|
+| empty (no EIP, no hostname) | Metadata supplies the address. Fatal if metadata returns nothing — the instance has no public address to serve on. |
+| an IPv4 (the Elastic IP) | Metadata **confirms** it. A mismatch is expected for a few seconds while the association lands, so it polls for up to 60s, then logs a prominent `WARNING` if they still disagree. |
+| a hostname | Logs the instance's public IP alongside it, so you can check the DNS record resolves to the right box. |
+
+The mismatch case warns rather than fails on purpose: the address could legitimately be
+fronted by something else, and failing the whole install on a heuristic would be worse
+than a loud log line. The observed address is also written to `/etc/tracecat/READY` as
+`instance_public_ipv4`, so the two values are side by side after the fact.
+
+This matters because the failure it catches is a nasty one — Tracecat writes the address
+into `.env`, the UI loads fine, and then every API call fails CORS. That looks like a
+Tracecat problem and is actually a networking one.
+
 ## Getting the script onto the box
 
 `user_data` is rendered from `cloud-init.yaml.tftpl`, which writes two files:
@@ -59,6 +79,24 @@ script stays a plain file you can lint and run locally.
 
 The script reads its configuration by sourcing `deploy.env`. Terraform interpolates only
 that small, flat file.
+
+### The 16 KB budget
+
+EC2 caps `user_data` at **16 KB**. The rendered cloud-init is about 19 KB — the
+base64-encoded script costs a further 33% on top of the script itself — so it does not
+fit as plain text.
+
+Terraform therefore submits it compressed:
+
+```hcl
+user_data_base64 = base64gzip(templatefile(...))
+```
+
+cloud-init detects gzipped user-data and decompresses it without any extra
+configuration. That brings the payload to roughly 8 KB, leaving about half the budget
+spare. **If you grow `scripts/bootstrap.sh` substantially, check the compressed size
+still fits** — the failure mode is an `apply` rejected by the EC2 API, which is at least
+loud.
 
 ## The unattended install
 

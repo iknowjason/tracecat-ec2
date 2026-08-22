@@ -167,12 +167,17 @@ resource "aws_instance" "this" {
 
   associate_public_ip_address = true
 
-  user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
+  # gzipped, because EC2 caps user_data at 16 KB and the rendered cloud-init is
+  # ~19 KB — the bootstrap script is base64-encoded inside it, which costs a
+  # further 33%. cloud-init detects and decompresses gzip automatically, and
+  # this brings it to roughly 8 KB. If you grow the bootstrap script, check the
+  # compressed size still fits.
+  user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
     tracecat_version = var.tracecat_version
     superadmin_email = var.superadmin_email
     app_host         = local.app_host
     bootstrap_b64    = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
-  })
+  }))
 
   # Replace the instance if the bootstrap configuration changes; cloud-init
   # only runs on first boot, so an in-place update would do nothing.

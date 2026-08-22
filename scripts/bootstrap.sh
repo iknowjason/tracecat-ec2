@@ -34,17 +34,61 @@ readonly RAW="https://raw.githubusercontent.com/TracecatHQ/tracecat/${TRACECAT_V
 # ── Work out the address the browser will use ───────────────────────────────
 # This has to be right or the UI loads and every API call fails CORS. Tracecat
 # requires PUBLIC_APP_URL and PUBLIC_API_URL to match the origin the browser
-# actually uses.
-if [[ -z "$APP_HOST" ]]; then
-    log "APP_HOST not supplied; asking instance metadata for the public IPv4"
-    # IMDSv2. The instance is configured to require it.
+# actually uses, and it bakes them into .env here at first boot.
+
+# IMDSv2 only — the instance is launched with http_tokens = "required".
+imds_public_ipv4() {
+    local token ip
     token=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
-        -H "X-aws-ec2-metadata-token-ttl-seconds: 300" --max-time 5) \
-        || fail "could not get an IMDSv2 token"
-    APP_HOST=$(curl -sS -H "X-aws-ec2-metadata-token: ${token}" \
-        --max-time 5 "http://169.254.169.254/latest/meta-data/public-ipv4") \
-        || fail "could not read public-ipv4 from instance metadata"
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 300" --max-time 5 2>/dev/null) || return 1
+    ip=$(curl -sS -H "X-aws-ec2-metadata-token: ${token}" --max-time 5 \
+        "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null) || return 1
+    [[ -n "$ip" ]] || return 1
+    printf '%s' "$ip"
+}
+
+is_ipv4() { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; }
+
+observed_ip=$(imds_public_ipv4 || true)
+log "Instance metadata reports public IPv4: ${observed_ip:-<none>}"
+
+if [[ -z "$APP_HOST" ]]; then
+    # No Elastic IP and no hostname from Terraform — metadata is the only source.
+    [[ -n "$observed_ip" ]] || fail "APP_HOST was not supplied and instance metadata returned no public IPv4. Is this instance in a public subnet with a public address?"
+    APP_HOST="$observed_ip"
+    log "APP_HOST not supplied; using the metadata address ${APP_HOST}"
+
+elif is_ipv4 "$APP_HOST"; then
+    # Terraform baked in an Elastic IP. Confirm it actually reaches this box.
+    #
+    # A mismatch right now is normal for a few seconds: Terraform allocates the
+    # EIP before the instance so its address can go into user_data, and the
+    # association lands in parallel with this boot. So poll rather than judging
+    # on the first read.
+    if [[ "$observed_ip" != "$APP_HOST" ]]; then
+        log "Configured address ${APP_HOST} does not match metadata yet; waiting for the Elastic IP association"
+        for _ in $(seq 1 12); do
+            sleep 5
+            observed_ip=$(imds_public_ipv4 || true)
+            [[ "$observed_ip" == "$APP_HOST" ]] && break
+        done
+    fi
+
+    if [[ "$observed_ip" == "$APP_HOST" ]]; then
+        log "Confirmed: ${APP_HOST} is this instance's public address"
+    else
+        log "WARNING: configured for ${APP_HOST} but metadata reports ${observed_ip:-<none>}."
+        log "WARNING: Tracecat is about to bake ${APP_HOST} into .env. If that address does"
+        log "WARNING: not reach this instance, the UI will load and every API call will fail"
+        log "WARNING: CORS. Check the Elastic IP association, then see docs/troubleshooting.md"
+    fi
+
+else
+    # A DNS name. We cannot resolve it to this instance from here with any
+    # confidence, so record both and let the operator check the record.
+    log "Serving on hostname ${APP_HOST}; ensure its DNS record points at ${observed_ip:-this instance}"
 fi
+
 [[ -n "$APP_HOST" ]] || fail "APP_HOST is empty — no public address to serve on"
 log "Tracecat will be served at http://${APP_HOST}"
 
@@ -234,6 +278,7 @@ tracecat_version=${TRACECAT_VERSION}
 install_dir=${INSTALL_DIR}
 app_url=http://${APP_HOST}
 app_port=${app_port}
+instance_public_ipv4=${observed_ip:-unknown}
 superadmin_email=${SUPERADMIN_EMAIL}
 completed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
