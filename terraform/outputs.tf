@@ -1,3 +1,8 @@
+output "allowed_cidrs_effective" {
+  description = "CIDR blocks actually permitted to reach the UI — either what you set, or the address Terraform detected."
+  value       = local.effective_cidrs
+}
+
 output "public_ip" {
   description = "Public IPv4 address of the Tracecat instance."
   value       = var.allocate_eip ? aws_eip.this[0].public_ip : aws_instance.this.public_ip

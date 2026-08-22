@@ -37,6 +37,15 @@ locals {
   # sort() so the choice is stable across runs; aws_subnets returns a set.
   subnet_id = var.subnet_id != null ? var.subnet_id : sort(data.aws_subnets.default[0].ids)[0]
 
+  # Look up our own address only when the operator did not supply a list.
+  detect_my_ip = var.auto_detect_my_ip && length(var.allowed_cidrs) == 0
+
+  # A for-expression over the (possibly empty) data source rather than
+  # data.http.my_ip[0], so there is no index to evaluate when count is 0.
+  detected_cidrs = [for r in data.http.my_ip : "${chomp(r.response_body)}/32"]
+
+  effective_cidrs = length(var.allowed_cidrs) > 0 ? var.allowed_cidrs : local.detected_cidrs
+
   # The address baked into Tracecat's .env at first boot.
   #
   # Order matters. An explicit hostname wins. Otherwise, if we allocated an
@@ -52,10 +61,43 @@ locals {
 }
 
 ########################################################################
+## Who is allowed in
+##
+## If allowed_cidrs is empty we ask an external service for the public
+## IP of the machine running Terraform and allow exactly that /32.
+##
+## This is a plan-time HTTP GET with no credentials. checkip.amazonaws.com
+## returns the bare address as text/plain with a trailing newline.
+########################################################################
+
+data "http" "my_ip" {
+  count = local.detect_my_ip ? 1 : 0
+
+  url             = "https://checkip.amazonaws.com"
+  request_headers = { Accept = "text/plain" }
+
+  retry {
+    attempts     = 3
+    min_delay_ms = 500
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "checkip.amazonaws.com returned HTTP ${self.status_code}. Set allowed_cidrs explicitly, or auto_detect_my_ip = false."
+    }
+    postcondition {
+      condition     = can(cidrnetmask("${chomp(self.response_body)}/32"))
+      error_message = "Could not read an IPv4 address from checkip.amazonaws.com (got: ${chomp(self.response_body)}). Set allowed_cidrs explicitly."
+    }
+  }
+}
+
+########################################################################
 ## Security group
 ##
-## Ingress is restricted to allowed_cidrs. Port 80 is the Caddy reverse
-## proxy that fronts the whole stack; nothing else needs to be reachable.
+## Ingress is restricted to the effective CIDR list. Port 80 is the Caddy
+## reverse proxy fronting the whole stack; nothing else is reachable.
 ########################################################################
 
 resource "aws_security_group" "this" {
@@ -67,11 +109,18 @@ resource "aws_security_group" "this" {
 
   lifecycle {
     create_before_destroy = true
+
+    # Without this, an empty list would silently produce a security group with
+    # no ingress rules at all, and a Tracecat you cannot reach.
+    precondition {
+      condition     = length(local.effective_cidrs) > 0
+      error_message = "No allowed CIDRs. Either set allowed_cidrs (e.g. [\"203.0.113.42/32\"]) or leave auto_detect_my_ip = true so Terraform can look up your address."
+    }
   }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ui" {
-  for_each = toset(var.allowed_cidrs)
+  for_each = toset(local.effective_cidrs)
 
   security_group_id = aws_security_group.this.id
   description       = "Tracecat UI (Caddy)"
@@ -82,7 +131,7 @@ resource "aws_vpc_security_group_ingress_rule" "ui" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
-  for_each = var.enable_ssh ? toset(var.allowed_cidrs) : toset([])
+  for_each = var.enable_ssh ? toset(local.effective_cidrs) : toset([])
 
   security_group_id = aws_security_group.this.id
   description       = "SSH"

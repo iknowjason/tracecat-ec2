@@ -33,15 +33,26 @@ cd /opt/tracecat && sudo docker compose ps
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost/
 ```
 
-If `localhost` answers but your browser does not, it is the security group. Your public
-address may have changed:
+If `localhost` answers but your browser does not, it is the security group. Compare what
+was allowed against where you actually are:
 
 ```bash
-curl -s https://checkip.amazonaws.com          # compare against allowed_cidrs
+terraform output allowed_cidrs_effective    # what the rule permits
+curl -s https://checkip.amazonaws.com       # where you are now
 ```
 
-Update `allowed_cidrs` in `terraform.tfvars` and re-apply — that changes only the security
-group rules, not the instance.
+Three common reasons they differ:
+
+- **Your address changed.** Residential IPs move. Re-run `terraform apply`; with the
+  automatic lookup, the plan will simply re-point the rule.
+- **Terraform ran somewhere else.** The lookup returns the address *Terraform* called
+  from. From CI, a bastion, or a different VPN, that is not your browser's address. Set
+  `allowed_cidrs` explicitly.
+- **You are behind a different egress than when you applied** — VPN on versus off is the
+  usual culprit.
+
+Either way, updating `allowed_cidrs` and re-applying changes only the security group
+rules, not the instance.
 
 Also confirm you are using **http://**, not https. There is no TLS here, and browsers
 increasingly try to upgrade automatically.

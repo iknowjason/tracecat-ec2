@@ -11,12 +11,41 @@ shaped the way it is.
 |---|---|
 | `aws_instance` | Ubuntu 24.04 LTS (Canonical AMI, looked up by filter), encrypted gp3 root volume, IMDSv2 required |
 | `aws_eip` + `aws_eip_association` | Allocated **before** the instance so the address can be written into `user_data` |
-| `aws_security_group` | Ingress on 80 from `allowed_cidrs` only; 22 as well when `enable_ssh` |
+| `aws_security_group` | Ingress on 80 from the effective CIDR list only; 22 as well when `enable_ssh` |
+| `data.http.my_ip` | Looks up the caller's public IP when `allowed_cidrs` is empty |
 | `aws_iam_role` + instance profile | `AmazonSSMManagedInstanceCore` only — shell access without SSH |
 | `data.aws_vpc` / `data.aws_subnets` | Default VPC unless you supply `vpc_id` / `subnet_id` |
 
 Security group rules use the modern `aws_vpc_security_group_ingress_rule` resources
 rather than inline `ingress` blocks, so a rule change does not churn the whole group.
+
+## Working out who is allowed in
+
+`allowed_cidrs` defaults to an empty list. When it is empty and `auto_detect_my_ip` is
+true, a `data "http"` source fetches `https://checkip.amazonaws.com` at plan time and the
+result becomes a single `/32`:
+
+```hcl
+detected_cidrs  = [for r in data.http.my_ip : "${chomp(r.response_body)}/32"]
+effective_cidrs = length(var.allowed_cidrs) > 0 ? var.allowed_cidrs : local.detected_cidrs
+```
+
+Three details are deliberate:
+
+- **A `for` expression, not `data.http.my_ip[0]`.** The data source has `count = 0` when
+  the lookup is disabled, and indexing into an empty list is a well-worn way to get an
+  error from a branch that was supposed to be inert. Iterating a possibly-empty list has
+  no index to evaluate.
+- **Two postconditions on the data source** — HTTP 200, and a body that parses as an IPv4
+  — so a captive portal or a redirect produces a clear message rather than a security
+  group rule containing an HTML error page.
+- **A precondition on the security group** requiring a non-empty list. Without it,
+  disabling the lookup and supplying nothing would build a security group with no ingress
+  rules at all: an instance that comes up perfectly and cannot be reached.
+
+The lookup reports the address **Terraform** calls from, which is not necessarily the
+browser's. That is documented rather than defended against, because there is no way for
+Terraform to know where you will open the UI from.
 
 ## The Elastic IP ordering problem
 

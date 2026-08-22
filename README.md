@@ -38,7 +38,7 @@ git clone https://github.com/iknowjason/tracecat-ec2.git
 cd tracecat-ec2/terraform
 
 cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars        # your CIDR and your email — both required
+$EDITOR terraform.tfvars        # your email is the only required value
 
 terraform init
 terraform plan
@@ -67,7 +67,7 @@ Full walkthrough: [docs/deploy.md](docs/deploy.md).
 | Terraform 1.6+ | |
 | Permission to create EC2, VPC security groups, IAM roles and EIPs | The IAM role is only for SSM Session Manager |
 | A default VPC, **or** an existing VPC and public subnet | Pass `vpc_id` / `subnet_id` if you have no default VPC |
-| An email address | Becomes the Tracecat superadmin |
+| An email address | Becomes the Tracecat superadmin — the only required variable |
 
 ---
 
@@ -77,9 +77,10 @@ This deployment serves **plain HTTP**. Tracecat's own documentation is explicit 
 HTTP-only deployment should not be exposed to a public domain. The design follows from
 that:
 
-- **`allowed_cidrs` has no default and rejects `0.0.0.0/0`** via a variable validation.
-  You have to say who may reach the instance. Opening it to the world requires
-  deliberately editing the rule, which is the point.
+- **Ingress is restricted to your own address by default.** Leave `allowed_cidrs` unset
+  and Terraform looks up the public IP it is calling from and allows that `/32` only.
+  `0.0.0.0/0` is rejected by a variable validation, so opening it to the world takes a
+  deliberate edit rather than an oversight.
 - **SSH is off by default.** The instance gets an IAM role for **SSM Session Manager**,
   so you can get a shell with no inbound port open and no key pair to manage. Set
   `enable_ssh = true` if you want port 22 anyway.

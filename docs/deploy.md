@@ -27,12 +27,36 @@ cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Two variables are required and have no defaults:
+Only one variable is required:
 
 ```hcl
-allowed_cidrs    = ["203.0.113.42/32"]   # who may reach the UI
 superadmin_email = "you@example.com"     # your Tracecat account
 ```
+
+**Who may reach the UI** is worked out for you. Leave `allowed_cidrs` unset and Terraform
+asks `checkip.amazonaws.com` for the public IP of the machine running it, then allows
+exactly that address as a `/32`. The plan shows you what it found, and so does an output:
+
+```bash
+terraform output allowed_cidrs_effective
+```
+
+Set it explicitly when the automatic answer is wrong:
+
+```hcl
+allowed_cidrs = ["203.0.113.42/32", "198.51.100.0/24"]
+```
+
+> **The lookup returns the address *Terraform* is calling from**, which is not always the
+> one your browser uses. Running Terraform from CI, a bastion, or through a different VPN
+> than your browser will allow the wrong address — you will get a working instance you
+> cannot reach. Set `allowed_cidrs` explicitly in those cases, or
+> `auto_detect_my_ip = false` to turn the lookup off entirely.
+>
+> Two other things to know. A residential IP that changes will show up as a diff on the
+> next `plan` — that is the lookup working, and applying it just re-points the rule. And
+> if you are on an IPv6-only network the lookup fails with a clear error, because the
+> `/32` assumption is IPv4.
 
 `allowed_cidrs` rejects `0.0.0.0/0` through a variable validation. That is deliberate:
 this deployment serves unencrypted HTTP, and Tracecat's documentation warns against

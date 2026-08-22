@@ -2,12 +2,20 @@
 #
 #   curl -s https://checkip.amazonaws.com     → your public address
 
-# Required. Who may reach the UI. This deployment serves plain HTTP, so
-# 0.0.0.0/0 is rejected by a variable validation rather than merely discouraged.
-allowed_cidrs = ["203.0.113.42/32"]
-
 # Required. You sign up with this address on first visit.
 superadmin_email = "you@example.com"
+
+# Who may reach the UI. Leave this out entirely and Terraform looks up the
+# public IP of the machine running it and allows just that /32.
+#
+# Set it explicitly for a corporate range, several offices, or when Terraform
+# runs somewhere your browser does not (CI, a bastion, a different VPN).
+# This deployment serves plain HTTP, so 0.0.0.0/0 is rejected by a validation
+# rather than merely discouraged.
+# allowed_cidrs = ["203.0.113.42/32"]
+
+# Turn the lookup off if you would rather always be explicit.
+# auto_detect_my_ip = false
 
 aws_region    = "us-east-1"
 instance_type = "t3.xlarge"

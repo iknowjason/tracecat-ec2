@@ -21,24 +21,33 @@ variable "allowed_cidrs" {
   description = <<-DESC
     CIDR blocks allowed to reach the Tracecat UI on port 80, and SSH if enabled.
 
-    There is deliberately no default. This deployment serves plain HTTP, and
-    Tracecat's own documentation warns against exposing an HTTP-only instance to
-    the open internet — so you have to state who may reach it.
+    Leave this empty to have Terraform look up the public IP of whatever machine
+    is running it and allow just that address as a /32. Set it explicitly when
+    you need something else — a corporate range, several offices, a VPN egress.
 
     Your current address:  curl -s https://checkip.amazonaws.com
-    Then use, for example: ["203.0.113.42/32"]
+    Explicit form:         ["203.0.113.42/32"]
   DESC
   type        = list(string)
-
-  validation {
-    condition     = length(var.allowed_cidrs) > 0
-    error_message = "Specify at least one CIDR block."
-  }
+  default     = []
 
   validation {
     condition     = !contains(var.allowed_cidrs, "0.0.0.0/0")
     error_message = "Refusing 0.0.0.0/0. This instance serves unencrypted HTTP; restrict it to known addresses, or put TLS in front of it and edit this rule deliberately."
   }
+}
+
+variable "auto_detect_my_ip" {
+  description = <<-DESC
+    When allowed_cidrs is empty, look up the public IP of the machine running
+    Terraform and allow that address only.
+
+    This is the IP Terraform sees, which is not necessarily the one your browser
+    uses — running from CI, a bastion, or a different VPN than your browser will
+    allow the wrong address. Set allowed_cidrs explicitly in those cases.
+  DESC
+  type        = bool
+  default     = true
 }
 
 variable "enable_ssh" {
