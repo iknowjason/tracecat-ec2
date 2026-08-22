@@ -37,12 +37,20 @@ UI, Caddy, two PostgreSQL instances, Temporal, MinIO and Redis.
 git clone https://github.com/iknowjason/tracecat-ec2.git
 cd tracecat-ec2/terraform
 
-cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars        # your email is the only required value
-
 terraform init
-terraform plan
 terraform apply
+```
+
+**Nothing is required.** Every variable has a default, so that is the whole thing — no
+`terraform.tfvars` needed and no prompts. Two defaults are worth knowing:
+
+| | Default | Change it if |
+|---|---|---|
+| `superadmin_email` | `admin@example.com` | you would rather log in as yourself. Nothing is emailed — the stack has no SMTP — so this is an identity, not a mailbox |
+| `allowed_cidrs` | your detected public IP, as a `/32` | Terraform runs somewhere your browser does not (CI, a bastion, a different VPN) |
+
+```bash
+cp terraform.tfvars.example terraform.tfvars   # optional — to override either
 ```
 
 Then:

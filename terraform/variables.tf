@@ -118,8 +118,18 @@ variable "allocate_eip" {
 # ── Tracecat ─────────────────────────────────────────────────────────────────
 
 variable "superadmin_email" {
-  description = "Email address for the first Tracecat user. You sign up with this address on first visit."
+  description = <<-DESC
+    Email address for the first Tracecat user — the superadmin.
+
+    You claim the account by signing up with this exact address on first visit
+    and choosing a password. Nothing is emailed to it: the compose stack has no
+    SMTP service, so this is an identity, not a mailbox that has to receive.
+
+    The default lets you deploy without supplying anything. Override it in
+    terraform.tfvars if you would rather log in as yourself.
+  DESC
   type        = string
+  default     = "admin@example.com"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$", var.superadmin_email))

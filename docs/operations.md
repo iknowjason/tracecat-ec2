@@ -75,6 +75,26 @@ aws s3 cp ~/tracecat-$(date +%F).sql.gz s3://your-bucket/tracecat/
 
 There is no automated backup here. If the database matters, schedule this.
 
+## Changing the superadmin email after deployment
+
+The address is written into `.env` at first boot, and cloud-init runs only once — so
+changing the Terraform variable afterwards replaces the instance and destroys the
+database. Edit it in place instead:
+
+```bash
+cd /opt/tracecat
+sudo sed -i 's|^TRACECAT__AUTH_SUPERADMIN_EMAIL=.*|TRACECAT__AUTH_SUPERADMIN_EMAIL=new@example.com|' .env
+sudo docker compose up -d
+```
+
+Then update `superadmin_email` in `terraform.tfvars` so a future rebuild matches what you
+are actually running — but do **not** apply that change expecting it to take effect in
+place. See the warning about `user_data_replace_on_change` under
+[Upgrading](#upgrading-tracecat).
+
+An account that has already been created keeps whatever privileges it has; this changes
+which address is treated as superadmin on subsequent sign-ups.
+
 ## Upgrading Tracecat
 
 Upstream ships a migration script that preserves your existing `.env`:

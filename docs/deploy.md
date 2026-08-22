@@ -27,13 +27,48 @@ cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Only one variable is required:
+**Nothing is required.** Every variable has a working default, so `terraform apply` runs
+without prompting and without a `terraform.tfvars` at all. Two of those defaults are
+worth a deliberate look before you apply.
+
+### Setting the superadmin email
+
+`superadmin_email` is the first Tracecat user — the account with full privileges. You
+claim it by signing up with that **exact** address on first visit and choosing a
+password.
+
+It defaults to `admin@example.com`, which works: the compose stack has no SMTP service,
+so nothing is ever mailed to it and the address is an identity rather than a mailbox that
+must receive. Sign in with `admin@example.com` and a password you choose and you are the
+superadmin.
+
+To log in as yourself instead, set it in `terraform.tfvars`:
 
 ```hcl
-superadmin_email = "you@example.com"     # your Tracecat account
+superadmin_email = "you@example.com"
 ```
 
-**Who may reach the UI** is worked out for you. Leave `allowed_cidrs` unset and Terraform
+Or pass it on the command line for a one-off:
+
+```bash
+terraform apply -var 'superadmin_email=you@example.com'
+```
+
+Check what will be used before you apply, and confirm it afterwards:
+
+```bash
+terraform output superadmin_email
+```
+
+> **Decide before the first apply.** The address is written into `/opt/tracecat/.env` when
+> the instance boots, and cloud-init only runs once. Changing the variable afterwards
+> forces Terraform to replace the instance, taking the database with it. To change it on a
+> running instance, edit `TRACECAT__AUTH_SUPERADMIN_EMAIL` in `/opt/tracecat/.env` and run
+> `docker compose up -d` — see [operations.md](operations.md).
+
+### Who may reach the UI
+
+This is worked out for you. Leave `allowed_cidrs` unset and Terraform
 asks `checkip.amazonaws.com` for the public IP of the machine running it, then allows
 exactly that address as a `/32`. The plan shows you what it found, and so does an output:
 

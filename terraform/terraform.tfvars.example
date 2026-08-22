@@ -2,8 +2,12 @@
 #
 #   curl -s https://checkip.amazonaws.com     → your public address
 
-# Required. You sign up with this address on first visit.
-superadmin_email = "you@example.com"
+# Nothing in this file is required — every variable has a working default.
+# Copy it and change what you care about.
+
+# The first Tracecat user. You sign up with this exact address on first visit.
+# Defaults to admin@example.com if you leave it out.
+# superadmin_email = "you@example.com"
 
 # Who may reach the UI. Leave this out entirely and Terraform looks up the
 # public IP of the machine running it and allows just that /32.
