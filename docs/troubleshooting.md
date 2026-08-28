@@ -169,6 +169,36 @@ instance's public address changed after the deploy — rebuild, or edit
 `/opt/tracecat/dex/config.yaml` and `.env` together and
 `docker compose up -d dex mcp`.
 
+## `dex` crash-loops on "permission denied" reading its config
+
+```
+error executing gomplate: ... readAll "/etc/dex/config.yaml":
+open etc/dex/config.yaml: permission denied
+```
+
+The dex image runs as uid 1001, and a bind mount keeps the host's ownership, so a
+config written root:root 0640 is unreadable to it. The bootstrap chowns the file to the
+uid it reads out of the image; if that step was skipped or the file was rewritten by
+hand, fix it in place:
+
+```bash
+sudo chown 1001:1001 /opt/tracecat/dex/config.yaml
+cd /opt/tracecat
+sudo docker compose up -d dex
+sudo docker compose up -d --force-recreate mcp
+```
+
+`mcp` needs the force-recreate because it exhausted `restart: on-failure:3` while dex was
+down and will otherwise stay stopped. Confirm afterwards:
+
+```bash
+. /etc/tracecat/READY
+curl -fsS "$mcp_issuer/.well-known/openid-configuration" | head -c 200
+```
+
+Note that this reproduces only on Linux. Docker Desktop on macOS virtualises bind-mount
+ownership, so the identical config mounted there starts fine.
+
 ## `/mcp` authenticates and then returns 401
 
 Sign-in at Dex succeeded but Tracecat does not know you. MCP authorises against an
