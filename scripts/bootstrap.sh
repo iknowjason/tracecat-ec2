@@ -29,6 +29,13 @@ source /etc/tracecat/deploy.env
 : "${PRODUCTION_MODE:=y}"
 : "${POSTGRES_SSL:=n}"
 
+# MCP server. Optional — unset means the mcp container will not start, which
+# leaves /mcp returning 502 and the rest of the stack working normally.
+: "${OIDC_ISSUER:=}"
+: "${OIDC_CLIENT_ID:=}"
+: "${OIDC_CLIENT_SECRET:=}"
+: "${OIDC_SCOPES:=openid profile email}"
+
 readonly RAW="https://raw.githubusercontent.com/TracecatHQ/tracecat/${TRACECAT_VERSION}"
 
 # ── Work out the address the browser will use ───────────────────────────────
@@ -248,6 +255,163 @@ if [[ -z "$origins" ]]; then
 fi
 log "  TRACECAT__ALLOW_ORIGINS is ${origins}"
 
+# ── Configure the MCP server ───────────────────────────────────────────────
+# Tracecat's mcp container is an OIDC proxy — it forwards authorization to an
+# external IdP rather than issuing tokens itself. Without an issuer it raises
+#
+#   OIDC_ISSUER must be configured for the MCP server.
+#
+# retries three times, exits, and crash-loops under `restart: on-failure:3`.
+# Caddy then answers an empty-bodied 502 on /mcp while every other route is
+# fine, which reads like a routing fault and is not one.
+#
+# env.sh does not prompt for any of this, so the values come from Terraform via
+# deploy.env. There is nothing to generate: they identify a client registered
+# with someone else's identity provider.
+
+# Replace a key outright rather than sed-substituting into it: the values are
+# operator-supplied and may contain characters that are meaningful in a sed
+# replacement. Only the key, which is a fixed literal, reaches sed here.
+#
+# The value is single-quoted because Docker Compose interpolates .env: an
+# unquoted secret containing `$` silently loses everything from the $ onward,
+# and one containing a space or `#` can be truncated. Compose treats a
+# single-quoted value as a literal and strips the quotes. A value containing a
+# single quote of its own cannot be expressed this way, so reject it rather
+# than write a broken file.
+dotenv_set() {
+    local key="$1" value="$2"
+    case "$value" in
+        *"'"*) fail "${key} contains a single quote, which cannot be written safely to .env. Set it directly in ${INSTALL_DIR}/.env after the deploy." ;;
+    esac
+    sed -i "/^${key}=/d" .env
+    printf "%s='%s'\n" "$key" "$value" >> .env
+}
+
+# The compose file falls back to ${PUBLIC_URL:-http://localhost:${PUBLIC_APP_PORT:-80}}
+# for this, and env.sh sets PUBLIC_APP_URL — not PUBLIC_URL. So left alone the
+# MCP server advertises localhost to external clients. Set it either way.
+dotenv_set TRACECAT_MCP__BASE_URL "$got_url"
+log "  TRACECAT_MCP__BASE_URL is ${got_url}"
+
+mcp_builtin=0
+effective_issuer=""
+if [[ -n "$OIDC_ISSUER" ]]; then
+    if [[ -z "$OIDC_CLIENT_ID" || -z "$OIDC_CLIENT_SECRET" ]]; then
+        fail "OIDC_ISSUER is set but OIDC_CLIENT_ID and/or OIDC_CLIENT_SECRET are empty. The MCP server needs all three; set them in terraform.tfvars or leave all three unset."
+    fi
+    dotenv_set OIDC_ISSUER "${OIDC_ISSUER%/}"
+    dotenv_set OIDC_CLIENT_ID "$OIDC_CLIENT_ID"
+    dotenv_set OIDC_CLIENT_SECRET "$OIDC_CLIENT_SECRET"
+    dotenv_set OIDC_SCOPES "$OIDC_SCOPES"
+    effective_issuer="${OIDC_ISSUER%/}"
+    log "  MCP server will authenticate against ${effective_issuer}"
+    log "  OIDC scopes: ${OIDC_SCOPES} (the server adds offline_access itself)"
+    mcp_configured=1
+elif [[ "${BUILTIN_IDP:-n}" == "y" ]]; then
+    # No external issuer, so deploy one. Dex is used rather than Cognito, Okta
+    # or Auth0 because all three require callback URLs to be https:// (only
+    # http://localhost is exempt) and this box serves plain HTTP on an IP
+    # address. Dex accepts an http issuer.
+    #
+    # The issuer has to be a single string that BOTH the operator's browser and
+    # the mcp container can reach, because fastmcp rejects a discovery document
+    # whose `issuer` does not match. An IP literal cannot satisfy both: the
+    # container's route to this instance's own public address leaves through the
+    # internet gateway and returns with a source address the security group does
+    # not allow. So the issuer uses a hostname, and the mcp container gets an
+    # /etc/hosts entry sending it to the Docker host instead — the browser
+    # resolves the name publicly, the container never leaves the box.
+    idp_port="${MCP_IDP_PORT:-5556}"
+    if [[ "$APP_HOST" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+        # nip.io resolves a-b-c-d.nip.io to a.b.c.d. Only the browser leg
+        # depends on it; the container is short-circuited by extra_hosts.
+        idp_host="${APP_HOST//./-}.nip.io"
+        log "  This instance has no DNS name, so the IdP issuer uses ${idp_host}"
+    else
+        idp_host="$APP_HOST"
+    fi
+
+    idp_issuer="http://${idp_host}:${idp_port}/dex"
+    idp_client_id="tracecat-mcp"
+    idp_client_secret="$(openssl rand -hex 32)"
+    idp_password="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+    idp_user_id="$(cat /proc/sys/kernel/random/uuid)"
+
+    # Dex stores static passwords as bcrypt, which neither the AMI nor openssl
+    # can produce. htpasswd -B can, and the httpd image is a smaller detour than
+    # installing a Python bcrypt toolchain for one hash.
+    idp_hash="$(docker run --rm httpd:2.4-alpine htpasswd -nbBC 10 mcp "$idp_password" | cut -d: -f2-)" \
+        || fail "could not generate the bcrypt hash for the MCP login"
+    [[ -n "$idp_hash" ]] || fail "bcrypt hash for the MCP login came back empty"
+
+    mkdir -p "${INSTALL_DIR}/dex"
+    # Single-quoted YAML scalars: a bcrypt hash is full of $ and the client
+    # secret is hex, and neither ever contains a single quote.
+    cat > "${INSTALL_DIR}/dex/config.yaml" <<EOF
+# Generated by tracecat-bootstrap. The identity provider behind /mcp.
+#
+# storage.type is memory: restarting this container signs every MCP client out,
+# which beats fighting volume ownership on a box that is rebuilt from Terraform
+# anyway. Sessions do not survive a reboot.
+issuer: ${idp_issuer}
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:${idp_port}
+oauth2:
+  skipApprovalScreen: true
+staticClients:
+  - id: ${idp_client_id}
+    name: Tracecat MCP
+    secret: '${idp_client_secret}'
+    redirectURIs:
+      - ${got_url}/auth/callback
+enablePasswordDB: true
+staticPasswords:
+  - email: '${SUPERADMIN_EMAIL}'
+    hash: '${idp_hash}'
+    username: mcp
+    userID: ${idp_user_id}
+EOF
+    chmod 0640 "${INSTALL_DIR}/dex/config.yaml"
+
+    cat > "${INSTALL_DIR}/docker-compose.override.yml" <<EOF
+# Generated by tracecat-bootstrap: the built-in identity provider for /mcp.
+services:
+  dex:
+    image: ${MCP_IDP_IMAGE:-ghcr.io/dexidp/dex:v2.45.1}
+    restart: unless-stopped
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "${idp_port}:${idp_port}"
+
+  mcp:
+    extra_hosts:
+      - "${idp_host}:host-gateway"
+    depends_on:
+      dex:
+        condition: service_started
+EOF
+
+    dotenv_set OIDC_ISSUER "$idp_issuer"
+    dotenv_set OIDC_CLIENT_ID "$idp_client_id"
+    dotenv_set OIDC_CLIENT_SECRET "$idp_client_secret"
+    dotenv_set OIDC_SCOPES "${OIDC_SCOPES:-openid profile email}"
+    effective_issuer="$idp_issuer"
+    log "  Built-in IdP at ${idp_issuer}, sign-in as ${SUPERADMIN_EMAIL}"
+    mcp_configured=1
+    mcp_builtin=1
+else
+    log "  MCP is disabled — the mcp container will not start."
+    log "  This affects only http://${APP_HOST}/mcp; the UI, API and workflows"
+    log "  are unaffected. Set enable_mcp = true for the built-in provider, or"
+    log "  oidc_issuer/oidc_client_id/oidc_client_secret for your own."
+    mcp_configured=0
+fi
+
 # ── Bring the stack up ─────────────────────────────────────────────────────
 log "Starting the Tracecat stack (this pulls ~15 images and takes a few minutes)"
 docker compose up -d || fail "docker compose up failed"
@@ -272,6 +436,25 @@ if (( ready == 0 )); then
     fail "stack did not become healthy — see 'docker compose logs' in ${INSTALL_DIR}"
 fi
 
+# ── Confirm the mcp container can actually reach the built-in IdP ──────────
+# fastmcp fetches the discovery document at startup and refuses to serve if the
+# issuer does not match, so a wrong answer here is the difference between /mcp
+# working and another empty 502. Checked from a container with the same
+# /etc/hosts override the mcp service gets, which is the path that matters.
+if (( mcp_builtin == 1 )); then
+    log "Checking the discovery document is reachable from a container"
+    if docker run --rm --add-host "${idp_host}:host-gateway" curlimages/curl:8.10.1 \
+        -fsS --max-time 10 "${idp_issuer}/.well-known/openid-configuration" >/dev/null 2>&1; then
+        log "  ${idp_issuer} answers"
+    else
+        log "  WARNING: could not fetch ${idp_issuer}/.well-known/openid-configuration"
+        log "  from inside a container. The mcp container will fail the same way and"
+        log "  /mcp will return 502. Check 'docker compose logs dex' and confirm the"
+        log "  dex container published port ${idp_port}."
+        mcp_configured=0
+    fi
+fi
+
 # ── Done ───────────────────────────────────────────────────────────────────
 cat > /etc/tracecat/READY <<EOF
 tracecat_version=${TRACECAT_VERSION}
@@ -280,9 +463,34 @@ app_url=http://${APP_HOST}
 app_port=${app_port}
 instance_public_ipv4=${observed_ip:-unknown}
 superadmin_email=${SUPERADMIN_EMAIL}
+mcp_configured=${mcp_configured}
+mcp_builtin_idp=${mcp_builtin}
+mcp_issuer=${effective_issuer}
 completed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
 
+# This file now carries the generated MCP login, so it stops being world
+# readable. Appended rather than written inline because a "0" for mcp_builtin is
+# still a non-empty string, and ${var:+...} would happily expand on it.
+chmod 0600 /etc/tracecat/READY
+if (( mcp_builtin == 1 )); then
+    cat >> /etc/tracecat/READY <<EOF
+mcp_login_email=${SUPERADMIN_EMAIL}
+mcp_login_password=${idp_password}
+EOF
+fi
+
 log "=== Tracecat is up at http://${APP_HOST} ==="
 log "First login: ${SUPERADMIN_EMAIL} (set a password via the sign-up form)"
+if (( mcp_configured == 1 )); then
+    log "MCP endpoint: http://${APP_HOST}/mcp (OIDC via ${effective_issuer})"
+    if (( mcp_builtin == 1 )); then
+        log "MCP sign-in: ${SUPERADMIN_EMAIL} / ${idp_password}"
+        log "  Sign into the UI and create that account FIRST. MCP authorises against"
+        log "  an existing Tracecat user, so /mcp returns 401 until it exists."
+        log "  The password is in /etc/tracecat/READY and nowhere else."
+    fi
+else
+    log "MCP endpoint: not enabled — /mcp will return 502 until an OIDC issuer is set"
+fi
 log "Secrets live in ${INSTALL_DIR}/.env — back that file up before you lose the instance."

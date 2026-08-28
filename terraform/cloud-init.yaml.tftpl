@@ -19,12 +19,27 @@ write_files:
       INSTALL_DIR=/opt/tracecat
       PRODUCTION_MODE=y
       POSTGRES_SSL=n
+      # Single-quoted: these are operator-supplied and may contain characters
+      # the shell would otherwise act on when the bootstrap sources this file.
+      OIDC_ISSUER='${oidc_issuer}'
+      OIDC_CLIENT_ID='${oidc_client_id}'
+      OIDC_CLIENT_SECRET='${oidc_client_secret}'
+      OIDC_SCOPES='${oidc_scopes}'
+      # Deploy the built-in Dex identity provider so /mcp works without an
+      # external account. Ignored when OIDC_ISSUER is set.
+      BUILTIN_IDP=${builtin_idp}
+      MCP_IDP_PORT=${mcp_idp_port}
+      MCP_IDP_IMAGE=${mcp_idp_image}
 
   - path: /usr/local/sbin/tracecat-bootstrap.sh
     permissions: "0750"
     owner: root:root
-    encoding: b64
-    content: ${bootstrap_b64}
+    # gzipped before base64, which cloud-init reverses natively. Base64 alone
+    # costs 33% on a file that then compresses poorly inside the outer gzip;
+    # compressing first takes the rendered user_data from ~18 KB to ~12.6 KB
+    # against EC2's 16 KB cap.
+    encoding: gz+b64
+    content: ${bootstrap_gz_b64}
 
 runcmd:
   - [ /usr/local/sbin/tracecat-bootstrap.sh ]

@@ -46,6 +46,11 @@ locals {
 
   effective_cidrs = length(var.allowed_cidrs) > 0 ? var.allowed_cidrs : local.detected_cidrs
 
+  # Deploy Dex only when the MCP server is wanted and no external issuer was
+  # given. An explicit oidc_issuer always wins; Dex would just be an unused
+  # container and an open port.
+  builtin_idp = var.enable_mcp && var.oidc_issuer == null
+
   # The address baked into Tracecat's .env at first boot.
   #
   # Order matters. An explicit hostname wins. Otherwise, if we allocated an
@@ -127,6 +132,20 @@ resource "aws_vpc_security_group_ingress_rule" "ui" {
   cidr_ipv4         = each.value
   from_port         = 80
   to_port           = 80
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "mcp_idp" {
+  # The MCP sign-in flow redirects the operator's *browser* to Dex, so this has
+  # to be reachable from wherever the MCP client runs — not just from the
+  # instance. Same CIDRs as the UI.
+  for_each = local.builtin_idp ? toset(local.effective_cidrs) : toset([])
+
+  security_group_id = aws_security_group.this.id
+  description       = "Built-in Dex identity provider for MCP"
+  cidr_ipv4         = each.value
+  from_port         = var.mcp_idp_port
+  to_port           = var.mcp_idp_port
   ip_protocol       = "tcp"
 }
 
@@ -216,21 +235,45 @@ resource "aws_instance" "this" {
 
   associate_public_ip_address = true
 
-  # gzipped, because EC2 caps user_data at 16 KB and the rendered cloud-init is
-  # ~19 KB — the bootstrap script is base64-encoded inside it, which costs a
-  # further 33%. cloud-init detects and decompresses gzip automatically, and
-  # this brings it to roughly 8 KB. If you grow the bootstrap script, check the
-  # compressed size still fits.
+  # Compressed twice, because EC2 caps user_data at 16 KB. The bootstrap script
+  # is gzipped and base64'd on its own (cloud-init's gz+b64 encoding undoes it),
+  # and the rendered document is gzipped again here — cloud-init detects and
+  # decompresses that automatically. Base64-encoding the script without
+  # compressing it first costs 33% on a payload the outer gzip then struggles
+  # with: ~18 KB rendered, over the cap. This lands at ~12.6 KB. If you grow the
+  # bootstrap script, re-measure.
   user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
     tracecat_version = var.tracecat_version
     superadmin_email = var.superadmin_email
     app_host         = local.app_host
-    bootstrap_b64    = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
+    bootstrap_gz_b64 = base64gzip(file("${path.module}/../scripts/bootstrap.sh"))
+
+    # Empty string rather than null: these land in a shell file that the
+    # bootstrap sources, and "null" would be written literally.
+    oidc_issuer        = var.oidc_issuer == null ? "" : var.oidc_issuer
+    oidc_client_id     = var.oidc_client_id == null ? "" : var.oidc_client_id
+    oidc_client_secret = var.oidc_client_secret == null ? "" : var.oidc_client_secret
+    oidc_scopes        = var.oidc_scopes
+
+    builtin_idp   = local.builtin_idp ? "y" : "n"
+    mcp_idp_port  = var.mcp_idp_port
+    mcp_idp_image = var.mcp_idp_image
   }))
 
   # Replace the instance if the bootstrap configuration changes; cloud-init
   # only runs on first boot, so an in-place update would do nothing.
   user_data_replace_on_change = true
+
+  lifecycle {
+    # Catch a half-configured MCP setup at plan time. The bootstrap checks this
+    # too, but failing here costs nothing and saves a fifteen-minute install.
+    precondition {
+      condition = var.oidc_issuer == null || (
+        var.oidc_client_id != null && var.oidc_client_secret != null
+      )
+      error_message = "oidc_client_id and oidc_client_secret are both required when oidc_issuer is set. Leave all three unset to deploy without the MCP server."
+    }
+  }
 
   root_block_device {
     volume_size           = var.root_volume_size

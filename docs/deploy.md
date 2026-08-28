@@ -172,7 +172,103 @@ account.
 Also available:
 
 - `http://<ip>/api/docs` — the API reference
-- `http://<ip>/mcp` — the MCP endpoint
+- `http://<ip>/mcp` — the MCP endpoint, working out of the box. See below for the
+  sign-in credentials.
+
+## 5a. The MCP endpoint
+
+Tracecat's `mcp` container is an OIDC **proxy**. It does not issue tokens; it forwards
+authorization to an identity provider. With no issuer configured it raises
+
+```
+OIDC_ISSUER must be configured for the MCP server.
+```
+
+retries three times, exits, and crash-loops under `restart: on-failure:3`. Caddy then
+returns an empty-bodied 502 on `/mcp` while every other route stays healthy — which
+looks like a routing fault and is not one.
+
+So this module deploys a provider: a [Dex](https://dexidp.io) container alongside the
+stack, with a generated client secret and one seeded login. That is `enable_mcp`, and it
+defaults to `true`.
+
+### Signing in
+
+The bootstrap generates the password at first boot and prints it once:
+
+```bash
+sudo grep ^mcp_ /etc/tracecat/READY
+```
+
+**Create the Tracecat account first.** MCP authorises against an existing Tracecat user,
+looked up by the email in the OIDC token. Until you have signed up in the UI as
+`superadmin_email`, `/mcp` authenticates you at Dex and then returns 401.
+
+Then point a client at `http://<ip>/mcp`; it runs an OAuth flow, sends you to Dex, and
+comes back with a token.
+
+### Why Dex and not Cognito
+
+Cognito, Okta and Auth0 all require callback URLs to be `https://`, with an exception
+only for `http://localhost`. This deploy serves plain HTTP on an IP address, and the
+proxy's callback is `http://<ip>/auth/callback`, so none of them will register it until
+the instance has a DNS name and a certificate. Dex accepts an `http` issuer.
+
+### The issuer hostname
+
+The issuer is `http://<ip-with-dashes>.nip.io:5556/dex`, not the bare IP, and that is
+deliberate. fastmcp rejects a discovery document whose `issuer` does not match the URL it
+fetched, so the browser and the `mcp` container must use the same string — and an IP
+literal cannot serve both. A container reaching this instance's own public address goes
+out through the internet gateway and comes back with a source address the security group
+does not allow. With a hostname, the compose override gives `mcp` an `/etc/hosts` entry
+(`extra_hosts: <host>:host-gateway`) pointing at the Docker host, so the container
+resolves it locally and never leaves the box, while your browser resolves it publicly via
+nip.io.
+
+The bootstrap verifies this before declaring success: it fetches the discovery document
+from inside a container with the same override, and warns loudly if that fails.
+
+Port `5556` is opened to the same CIDRs as the UI, because your *browser* is redirected
+there during sign-in. Change it with `mcp_idp_port`.
+
+Dex uses in-memory storage, so restarting that container — or the instance — signs every
+MCP client out. Re-running the OAuth flow is all that is needed.
+
+### Using your own identity provider instead
+
+Set `oidc_issuer` and Dex is not deployed at all, the port is not opened, and the MCP
+server points at your provider:
+
+```hcl
+oidc_issuer        = "https://example.okta.com/oauth2/default"
+oidc_client_id     = "0oa1b2c3d4e5f6g7h8i9"
+oidc_client_secret = "..."
+```
+
+All three or none — Terraform rejects a partial set at plan time. Register
+`<public URL>/auth/callback` as a redirect URI with that provider, which in practice
+means giving this instance a DNS name and TLS first. The bootstrap writes the values into
+`.env` along with `TRACECAT_MCP__BASE_URL`, which is set to your public URL because the
+compose default falls back to `localhost` and would otherwise advertise an address no
+external client can reach.
+
+To deploy with no MCP server at all, set `enable_mcp = false` and leave `oidc_issuer`
+unset.
+
+> **The client secret goes into user_data.** That is not a secret store: anyone with
+> `ec2:DescribeInstanceAttribute` in this account can read it back, as can any process on
+> the instance able to reach IMDS — a compromised container included. It also lands in
+> Terraform state. This applies to `oidc_client_secret` only; the built-in Dex secret is
+> generated on the instance and never leaves it. For anything past evaluation, leave
+> `oidc_client_secret` unset and write it into `/opt/tracecat/.env` by hand:
+>
+> ```bash
+> cd /opt/tracecat
+> sudo sed -i "/^OIDC_CLIENT_SECRET=/d" .env
+> echo "OIDC_CLIENT_SECRET='...'" | sudo tee -a .env >/dev/null
+> sudo docker compose up -d mcp
+> ```
 
 ## 6. Back up the secrets, now
 

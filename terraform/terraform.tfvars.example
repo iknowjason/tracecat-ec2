@@ -35,3 +35,28 @@ instance_type = "t3.xlarge"
 # Optional: serve on a hostname instead of the raw IP. Point DNS at the
 # Elastic IP first — Tracecat bakes this into PUBLIC_APP_URL at first boot.
 # app_hostname = "tracecat.example.com"
+
+# The MCP endpoint at http://<ip>/mcp is on by default.
+#
+# Tracecat's MCP container is an OIDC proxy and will not start without an
+# identity provider, so a Dex container is deployed alongside the stack with a
+# generated secret and one seeded login. Read the credentials afterwards with
+#   sudo grep ^mcp_ /etc/tracecat/READY
+#
+# enable_mcp   = false                        # deploy without the MCP server
+# mcp_idp_port = 5556                         # Dex's port, opened to allowed_cidrs
+# mcp_idp_image = "ghcr.io/dexidp/dex:v2.45.1"
+#
+# To use your own identity provider instead, set all three of these and Dex is
+# not deployed at all. The provider must allow http://<ip>/auth/callback as a
+# redirect URI — which for a hosted IdP means giving this instance a DNS name
+# and TLS first, since Cognito, Okta and Auth0 all require https callbacks.
+#
+# SECURITY: oidc_client_secret is written into the instance's user_data and into
+# Terraform state. The built-in Dex secret is generated on the instance instead
+# and never leaves it.
+#
+# oidc_issuer        = "https://example.okta.com/oauth2/default"
+# oidc_client_id     = "0oa1b2c3d4e5f6g7h8i9"
+# oidc_client_secret = "..."
+# oidc_scopes        = "openid profile email"

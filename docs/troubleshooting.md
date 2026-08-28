@@ -123,6 +123,75 @@ generated `.env` and stops with this message. To fix:
 You can also finish the install by hand — `cd /opt/tracecat && ./env.sh` interactively,
 then `docker compose up -d`.
 
+## `/mcp` returns 502 but everything else works
+
+The giveaway is that `http://<ip>/` answers 200 while `POST /mcp` returns a 502 with
+an empty body: Caddy is routing correctly and reporting that it cannot reach what it
+proxies to — the `mcp` container is not listening.
+
+```bash
+docker compose logs mcp
+docker compose logs dex
+```
+
+The error that matters:
+
+```
+ERROR __main__:main:48 - MCP server failed to start after maximum startup attempts
+  {'attempts': 3, 'error': 'OIDC_ISSUER must be configured for the MCP server.'}
+```
+
+The MCP server is an OIDC proxy and refuses to start without an issuer. It is not a
+routing problem, not memory, and restarting will not help.
+
+On a default deploy an issuer *is* configured — the built-in Dex provider — so this
+error means either `enable_mcp = false`, or Dex did not come up. Check what the deploy
+decided:
+
+```bash
+sudo grep ^mcp /etc/tracecat/READY
+grep -E '^(OIDC_|TRACECAT_MCP__)' /opt/tracecat/.env
+```
+
+If `mcp_configured=0` with `mcp_builtin_idp=1`, the bootstrap's own reachability check
+failed. Reproduce it:
+
+```bash
+. /etc/tracecat/READY
+docker run --rm --add-host "$(echo "$mcp_issuer" | awk -F[/:] '{print $4}'):host-gateway" \
+  curlimages/curl:8.10.1 -fsS "$mcp_issuer/.well-known/openid-configuration"
+```
+
+That must return JSON whose `issuer` field is byte-identical to `$mcp_issuer`; fastmcp
+rejects any mismatch. If it times out, confirm Dex published its port
+(`docker compose ps dex`). If it returns a document with a different `issuer`, the
+instance's public address changed after the deploy — rebuild, or edit
+`/opt/tracecat/dex/config.yaml` and `.env` together and
+`docker compose up -d dex mcp`.
+
+## `/mcp` authenticates and then returns 401
+
+Sign-in at Dex succeeded but Tracecat does not know you. MCP authorises against an
+existing Tracecat user, matched on the email claim, and the account is only created when
+someone completes the sign-up form in the UI. Sign in at `http://<ip>/` as
+`superadmin_email` once, then retry. The two must be the same address:
+
+```bash
+sudo grep -E '^(superadmin_email|mcp_login_email)' /etc/tracecat/READY
+```
+
+## MCP clients are signed out after a reboot
+
+Expected. Dex stores sessions in memory, so restarting that container or the instance
+invalidates every token. Run the client's OAuth flow again.
+
+- **The MCP server advertises `localhost`.** `TRACECAT_MCP__BASE_URL` falls back to
+  `PUBLIC_URL` in the compose file, but `env.sh` sets `PUBLIC_APP_URL`. The bootstrap sets
+  it explicitly for this reason; if you regenerate `.env` by hand, set it yourself.
+- **A secret containing `$` is silently truncated.** Docker Compose interpolates `.env`,
+  so values must be single-quoted — `OIDC_CLIENT_SECRET='...'`. The bootstrap always
+  quotes; hand-edits often do not.
+
 ## Containers being OOM-killed
 
 ```bash

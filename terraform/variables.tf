@@ -155,6 +155,127 @@ variable "app_hostname" {
   default     = null
 }
 
+# ── MCP server ───────────────────────────────────────────────────────────────
+# Tracecat's MCP container is an OIDC *proxy*: it forwards authorization to an
+# identity provider rather than issuing tokens itself, and refuses to start
+# without an issuer. Because docker-compose.yml sets `restart: on-failure:3` it
+# then crash-loops, and Caddy answers an empty-bodied 502 on /mcp while the rest
+# of the stack is perfectly healthy.
+#
+# It proxies via fastmcp's OIDCProxy, which registers ONE static client upstream
+# and emulates dynamic client registration towards MCP clients itself. So the
+# provider does not need to support DCR — any OIDC provider with a discovery
+# document will do.
+#
+# By default this module deploys one: a Dex container alongside the stack, with
+# a generated client secret and a single seeded login. That is what makes /mcp
+# work out of the box. Set oidc_issuer to point at your own IdP instead.
+#
+# Why not Cognito, Okta or Auth0 by default: all three require callback URLs to
+# be https:// (only http://localhost is exempt), and this deploy serves plain
+# HTTP on an IP address. The MCP proxy's callback is
+# <public URL>/auth/callback, so a hosted IdP cannot register it until the
+# instance has a DNS name and a certificate. Dex accepts an http issuer, so it
+# works on the box as shipped.
+
+variable "enable_mcp" {
+  description = <<-DESC
+    Deploy the built-in Dex identity provider so the MCP server starts and
+    http://<host>/mcp works without any external account.
+
+    Dex is published on mcp_idp_port and its login is generated at boot; the
+    bootstrap prints the credentials and writes them to /etc/tracecat/READY.
+
+    Ignored when oidc_issuer is set — an explicit issuer always wins. Set this
+    false and leave oidc_issuer null to deploy without the MCP server at all.
+  DESC
+  type        = bool
+  default     = true
+}
+
+variable "mcp_idp_port" {
+  description = <<-DESC
+    Port the built-in Dex identity provider listens on, reachable from the same
+    CIDRs as the UI. The browser is redirected here during MCP sign-in, so it
+    must be reachable from wherever you run the MCP client.
+  DESC
+  type        = number
+  default     = 5556
+
+  validation {
+    condition     = var.mcp_idp_port > 1024 && var.mcp_idp_port < 65536
+    error_message = "mcp_idp_port must be between 1025 and 65535."
+  }
+}
+
+variable "mcp_idp_image" {
+  description = <<-DESC
+    Container image for the built-in Dex identity provider.
+
+    Pinned rather than :latest so a rebuild six months from now deploys what was
+    tested. Bump it deliberately.
+  DESC
+  type        = string
+  default     = "ghcr.io/dexidp/dex:v2.45.1"
+}
+
+variable "oidc_issuer" {
+  description = <<-DESC
+    External OIDC issuer URL for the MCP server, no trailing slash. For example
+    https://example.okta.com/oauth2/default or https://accounts.google.com.
+
+    Leave null to use the built-in Dex provider (see enable_mcp). Setting this
+    replaces Dex entirely: no Dex container is deployed and mcp_idp_port is not
+    opened.
+
+    The issuer must serve /.well-known/openid-configuration, the instance needs
+    outbound access to reach it, and the client registered there must allow
+    <public URL>/auth/callback as a redirect URI — which for a hosted IdP means
+    this instance needs a DNS name and TLS first.
+  DESC
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.oidc_issuer == null || can(regex("^https://[^/]+(/[^/]+)*$", var.oidc_issuer))
+    error_message = "oidc_issuer must be an https:// URL with no trailing slash."
+  }
+}
+
+variable "oidc_client_id" {
+  description = "OIDC client ID registered with the external issuer. Required when oidc_issuer is set; unused otherwise."
+  type        = string
+  default     = null
+}
+
+variable "oidc_client_secret" {
+  description = <<-DESC
+    OIDC client secret. Required when oidc_issuer is set.
+
+    SECURITY: this is written into the instance's user_data, which is not a
+    secret store. Anyone holding ec2:DescribeInstanceAttribute in this account
+    can read it back, as can any process on the instance that reaches IMDS —
+    including a compromised container. It is also recorded in Terraform state.
+
+    For anything past evaluation, leave this null and write the secret into
+    /opt/tracecat/.env by hand after the deploy. See docs/deploy.md.
+  DESC
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "oidc_scopes" {
+  description = <<-DESC
+    Space-separated OIDC scopes requested by the MCP server.
+
+    The server appends offline_access itself so the IdP issues refresh tokens,
+    and retries once without it if the issuer rejects that scope.
+  DESC
+  type        = string
+  default     = "openid profile email"
+}
+
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)
