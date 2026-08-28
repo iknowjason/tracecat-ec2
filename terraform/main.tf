@@ -152,6 +152,22 @@ resource "aws_vpc_security_group_ingress_rule" "ui_tls" {
   ip_protocol       = "tcp"
 }
 
+resource "aws_vpc_security_group_ingress_rule" "ui_quic" {
+  # HTTP/3, which Caddy advertises with an alt-svc header on every response.
+  # Browsers take it up and move to QUIC over UDP 443. Without this rule the
+  # page still loads over TCP/h2 and then every fetch is dropped with no
+  # response at all — which a browser reports as a bare "NetworkError", while
+  # curl, which does not negotiate h3, sees a completely healthy stack.
+  for_each = local.enable_tls ? toset(local.effective_cidrs) : toset([])
+
+  security_group_id = aws_security_group.this.id
+  description       = "Tracecat UI (Caddy, HTTP/3)"
+  cidr_ipv4         = each.value
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "udp"
+}
+
 resource "aws_vpc_security_group_ingress_rule" "acme" {
   # Let's Encrypt validates HTTP-01 from addresses it does not publish and which
   # change, so this cannot be narrowed to your CIDRs. Port 80 serves the

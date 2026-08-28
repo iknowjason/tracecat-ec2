@@ -218,6 +218,39 @@ resolving to this instance. If it is re-issuing on every restart, the `caddy-dat
 is missing from `docker-compose.override.yml` — Let's Encrypt allows five identical
 certificates a week.
 
+## The UI loads but every action fails with "NetworkError"
+
+The page renders, `curl` against the API returns 200 from the command line, and the
+browser still cannot fetch anything. The giveaway is in the response headers:
+
+```
+alt-svc: h3=":443"; ma=2592000
+```
+
+Caddy advertises HTTP/3, so the browser moves to QUIC on **UDP** 443 after the first
+request. If only TCP 443 is open, those packets are dropped with no response — a bare
+"NetworkError when attempting to fetch resource", with nothing in any server log,
+while curl keeps working because it does not negotiate h3.
+
+The module opens UDP 443 to the same CIDRs as TCP. If you are running an older deploy,
+or your own network blocks outbound UDP, either add the rule:
+
+```bash
+aws ec2 authorize-security-group-ingress --group-id <sg-id> \
+  --ip-permissions 'IpProtocol=udp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=<your-ip>/32}]'
+```
+
+or turn HTTP/3 off in Caddy, which costs nothing and removes the dependency entirely —
+add to the global options block at the top of `/opt/tracecat/Caddyfile`:
+
+```
+	servers {
+		protocols h1 h2
+	}
+```
+
+then `docker compose restart caddy`.
+
 ## `/mcp` authenticates and then returns 401
 
 Sign-in at Dex succeeded but Tracecat does not know you. MCP authorises against an
