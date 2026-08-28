@@ -215,13 +215,35 @@ printf '%s\n%s\n%s\n%s\n' \
 # single-quoted value as a literal and strips the quotes. A value containing a
 # single quote of its own cannot be expressed this way, so reject it rather
 # than write a broken file.
+#
+# Position is preserved when the key already exists, and that matters: Compose
+# interpolates variables *inside* .env in file order, and Tracecat's .env chains
+# them — PUBLIC_API_URL is ${PUBLIC_APP_URL}/api, NEXT_PUBLIC_API_URL is
+# ${PUBLIC_API_URL}, TRACECAT__ALLOW_ORIGINS ends in ${PUBLIC_APP_URL}. Deleting
+# a key and appending it at the end would leave every earlier reference
+# resolving to an empty string, and the UI would fetch from nowhere.
 dotenv_set() {
     local key="$1" value="$2"
     case "$value" in
         *"'"*) fail "${key} contains a single quote, which cannot be written safely to .env. Set it directly in ${INSTALL_DIR}/.env after the deploy." ;;
     esac
-    sed -i "/^${key}=/d" .env
-    printf "%s='%s'\n" "$key" "$value" >> .env
+    if grep -q "^${key}=" .env; then
+        python3 - "$key" "$value" <<'PYENV'
+import sys
+key, value = sys.argv[1], sys.argv[2]
+out, done = [], False
+for line in open(".env"):
+    if line.startswith(key + "=") and not done:
+        out.append("%s='%s'\n" % (key, value)); done = True
+    elif line.startswith(key + "="):
+        continue  # drop any duplicate further down
+    else:
+        out.append(line)
+open(".env", "w").writelines(out)
+PYENV
+    else
+        printf "%s='%s'\n" "$key" "$value" >> .env
+    fi
 }
 
 # ── Verify the answers actually landed ─────────────────────────────────────
