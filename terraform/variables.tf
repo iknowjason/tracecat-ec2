@@ -129,7 +129,7 @@ variable "superadmin_email" {
     terraform.tfvars if you would rather log in as yourself.
   DESC
   type        = string
-  default     = "admin@example.com"
+  default     = "jostrom@stora.io"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$", var.superadmin_email))

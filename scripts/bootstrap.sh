@@ -195,19 +195,34 @@ if [[ -f .env ]]; then
 fi
 
 log "Running env.sh non-interactively"
-# With TLS the load balancer terminates HTTPS and forwards plain HTTP to Caddy,
-# so the stack still listens on 80 — but every URL it advertises must be https,
-# or the browser blocks mixed content and the MCP server refuses its own issuer.
-if [[ "${ENABLE_TLS:-n}" == "y" ]]; then
-    url_answer="https://${APP_HOST}"
-else
-    url_answer="$APP_HOST"
-fi
+# Answered without a scheme on purpose: env.sh strips whatever scheme you give
+# it ("sed -E 's/^\s*.*:\/\///g'") and then hardcodes base_url="http://${hostname}".
+# There is no answer that makes it emit https, so the URLs are corrected after
+# it runs instead.
 printf '%s\n%s\n%s\n%s\n' \
-    "$PRODUCTION_MODE" "$url_answer" "$POSTGRES_SSL" "$SUPERADMIN_EMAIL" \
+    "$PRODUCTION_MODE" "$APP_HOST" "$POSTGRES_SSL" "$SUPERADMIN_EMAIL" \
     | bash ./env.sh || fail "env.sh exited non-zero"
 
 [[ -f .env ]] || fail "env.sh did not produce a .env file"
+
+# Replace a key outright rather than sed-substituting into it: the values are
+# operator-supplied and may contain characters that are meaningful in a sed
+# replacement. Only the key, which is a fixed literal, reaches sed here.
+#
+# The value is single-quoted because Docker Compose interpolates .env: an
+# unquoted secret containing `$` silently loses everything from the $ onward,
+# and one containing a space or `#` can be truncated. Compose treats a
+# single-quoted value as a literal and strips the quotes. A value containing a
+# single quote of its own cannot be expressed this way, so reject it rather
+# than write a broken file.
+dotenv_set() {
+    local key="$1" value="$2"
+    case "$value" in
+        *"'"*) fail "${key} contains a single quote, which cannot be written safely to .env. Set it directly in ${INSTALL_DIR}/.env after the deploy." ;;
+    esac
+    sed -i "/^${key}=/d" .env
+    printf "%s='%s'\n" "$key" "$value" >> .env
+}
 
 # ── Verify the answers actually landed ─────────────────────────────────────
 # Piping answers into an interactive script is brittle by nature: if upstream
@@ -233,6 +248,17 @@ got_email=$(check_set TRACECAT__AUTH_SUPERADMIN_EMAIL)
 log "  superadmin email is ${got_email}"
 
 got_url=$(check_set PUBLIC_APP_URL)
+
+# env.sh can only produce http:// (it strips the scheme from the answer and
+# rebuilds the URL with a literal "http://"), so with TLS on, every URL it just
+# wrote is wrong. Fix them here, before ALLOW_ORIGINS, TRACECAT_MCP__BASE_URL
+# and the Dex issuer are all derived from this value further down.
+if [[ "${ENABLE_TLS:-n}" == "y" ]]; then
+    got_url="https://${APP_HOST}"
+    dotenv_set PUBLIC_APP_URL "$got_url"
+    dotenv_set PUBLIC_API_URL "${got_url}/api"
+    log "  Rewrote the URLs env.sh wrote as http:// to ${got_url}"
+fi
 [[ "$got_url" == *"$APP_HOST"* ]] \
     || fail "PUBLIC_APP_URL is '${got_url}', which does not contain '${APP_HOST}' — the prompt order in env.sh has changed"
 log "  PUBLIC_APP_URL is ${got_url}"
@@ -263,24 +289,6 @@ if [[ -z "$origins" ]]; then
 fi
 log "  TRACECAT__ALLOW_ORIGINS is ${origins}"
 
-# Replace a key outright rather than sed-substituting into it: the values are
-# operator-supplied and may contain characters that are meaningful in a sed
-# replacement. Only the key, which is a fixed literal, reaches sed here.
-#
-# The value is single-quoted because Docker Compose interpolates .env: an
-# unquoted secret containing `$` silently loses everything from the $ onward,
-# and one containing a space or `#` can be truncated. Compose treats a
-# single-quoted value as a literal and strips the quotes. A value containing a
-# single quote of its own cannot be expressed this way, so reject it rather
-# than write a broken file.
-dotenv_set() {
-    local key="$1" value="$2"
-    case "$value" in
-        *"'"*) fail "${key} contains a single quote, which cannot be written safely to .env. Set it directly in ${INSTALL_DIR}/.env after the deploy." ;;
-    esac
-    sed -i "/^${key}=/d" .env
-    printf "%s='%s'\n" "$key" "$value" >> .env
-}
 
 # ── Turn on TLS ────────────────────────────────────────────────────────────
 # Caddy gets its own certificate from Let's Encrypt. Setting BASE_DOMAIN to a
