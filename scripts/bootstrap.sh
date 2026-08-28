@@ -295,6 +295,7 @@ dotenv_set TRACECAT_MCP__BASE_URL "$got_url"
 log "  TRACECAT_MCP__BASE_URL is ${got_url}"
 
 mcp_builtin=0
+mcp_failure=""
 effective_issuer=""
 if [[ -n "$OIDC_ISSUER" ]]; then
     if [[ -z "$OIDC_CLIENT_ID" || -z "$OIDC_CLIENT_SECRET" ]]; then
@@ -452,6 +453,7 @@ if (( mcp_builtin == 1 )); then
         log "  /mcp will return 502. Check 'docker compose logs dex' and confirm the"
         log "  dex container published port ${idp_port}."
         mcp_configured=0
+        mcp_failure=idp_unreachable
     fi
 fi
 
@@ -490,6 +492,13 @@ if (( mcp_configured == 1 )); then
         log "  an existing Tracecat user, so /mcp returns 401 until it exists."
         log "  The password is in /etc/tracecat/READY and nowhere else."
     fi
+elif [[ "$mcp_failure" == "idp_unreachable" ]]; then
+    # Distinct from "no issuer configured": one is a choice, this is a fault, and
+    # telling you to set an issuer you already have would send you the wrong way.
+    log "MCP endpoint: BROKEN — an issuer is configured but the built-in provider at"
+    log "  ${idp_issuer} is not reachable from a container, so"
+    log "  the mcp container will fail the same way and /mcp will return 502."
+    log "  Start with 'docker compose logs dex'; see docs/troubleshooting.md."
 else
     log "MCP endpoint: not enabled — /mcp will return 502 until an OIDC issuer is set"
 fi
