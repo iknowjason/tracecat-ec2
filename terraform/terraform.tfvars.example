@@ -43,8 +43,16 @@ instance_type = "t3.xlarge"
 # generated secret and one seeded login. Read the credentials afterwards with
 #   sudo grep ^mcp_ /etc/tracecat/READY
 #
-# enable_mcp   = false                        # deploy without the MCP server
-# mcp_idp_port = 5556                         # Dex's port, opened to allowed_cidrs
+# MCP REQUIRES TLS: the MCP server refuses to start unless its issuer URL is
+# https, so app_hostname and hosted_zone_id below are not optional if you want
+# /mcp. Port 80 then opens to the internet for the ACME challenge; 443 stays
+# restricted to allowed_cidrs.
+#
+# app_hostname   = "tracecat.example.com"
+# hosted_zone_id = "Z1234567890ABC"
+# acme_email     = "you@example.com"          # defaults to superadmin_email
+#
+# enable_mcp    = false                       # deploy without the MCP server
 # mcp_idp_image = "ghcr.io/dexidp/dex:v2.45.1"
 #
 # To use your own identity provider instead, set all three of these and Dex is

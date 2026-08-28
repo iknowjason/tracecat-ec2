@@ -46,6 +46,10 @@ locals {
 
   effective_cidrs = length(var.allowed_cidrs) > 0 ? var.allowed_cidrs : local.detected_cidrs
 
+  # TLS is on exactly when there is a name to put on a certificate.
+  enable_tls = var.app_hostname != null
+  acme_email = var.acme_email != null ? var.acme_email : var.superadmin_email
+
   # Deploy Dex only when the MCP server is wanted and no external issuer was
   # given. An explicit oidc_issuer always wins; Dex would just be an unused
   # container and an open port.
@@ -125,7 +129,9 @@ resource "aws_security_group" "this" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ui" {
-  for_each = toset(local.effective_cidrs)
+  # Plain HTTP only serves the app when TLS is off. With TLS on, port 80 is
+  # opened to everyone below instead, and this rule would be redundant.
+  for_each = local.enable_tls ? toset([]) : toset(local.effective_cidrs)
 
   security_group_id = aws_security_group.this.id
   description       = "Tracecat UI (Caddy)"
@@ -135,19 +141,31 @@ resource "aws_vpc_security_group_ingress_rule" "ui" {
   ip_protocol       = "tcp"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "mcp_idp" {
-  # The MCP sign-in flow redirects the operator's *browser* to Dex, so this has
-  # to be reachable from wherever the MCP client runs — not just from the
-  # instance. Same CIDRs as the UI.
-  for_each = local.builtin_idp ? toset(local.effective_cidrs) : toset([])
+resource "aws_vpc_security_group_ingress_rule" "ui_tls" {
+  for_each = local.enable_tls ? toset(local.effective_cidrs) : toset([])
 
   security_group_id = aws_security_group.this.id
-  description       = "Built-in Dex identity provider for MCP"
+  description       = "Tracecat UI (Caddy, TLS)"
   cidr_ipv4         = each.value
-  from_port         = var.mcp_idp_port
-  to_port           = var.mcp_idp_port
+  from_port         = 443
+  to_port           = 443
   ip_protocol       = "tcp"
 }
+
+resource "aws_vpc_security_group_ingress_rule" "acme" {
+  # Let's Encrypt validates HTTP-01 from addresses it does not publish and which
+  # change, so this cannot be narrowed to your CIDRs. Port 80 serves the
+  # challenge and otherwise only redirects to 443, which stays restricted.
+  count = local.enable_tls ? 1 : 0
+
+  security_group_id = aws_security_group.this.id
+  description       = "ACME HTTP-01 challenge and HTTPS redirect"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
+}
+
 
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
   for_each = var.enable_ssh ? toset(local.effective_cidrs) : toset([])
@@ -256,8 +274,9 @@ resource "aws_instance" "this" {
     oidc_scopes        = var.oidc_scopes
 
     builtin_idp   = local.builtin_idp ? "y" : "n"
-    mcp_idp_port  = var.mcp_idp_port
     mcp_idp_image = var.mcp_idp_image
+    enable_tls    = local.enable_tls ? "y" : "n"
+    acme_email    = local.acme_email
   }))
 
   # Replace the instance if the bootstrap configuration changes; cloud-init
@@ -272,6 +291,19 @@ resource "aws_instance" "this" {
         var.oidc_client_id != null && var.oidc_client_secret != null
       )
       error_message = "oidc_client_id and oidc_client_secret are both required when oidc_issuer is set. Leave all three unset to deploy without the MCP server."
+    }
+
+    # The MCP SDK validates its own issuer URL and rejects anything that is not
+    # https (localhost aside), so MCP over a bare IP cannot work whatever the
+    # identity provider is. Fail here rather than crash-loop the mcp container.
+    precondition {
+      condition     = var.hosted_zone_id == null || var.allocate_eip
+      error_message = "hosted_zone_id needs allocate_eip, so the address exists before the A record is written. Without an Elastic IP, point app_hostname at the instance yourself."
+    }
+
+    precondition {
+      condition     = !var.enable_mcp || var.app_hostname != null
+      error_message = "enable_mcp requires app_hostname: the MCP server refuses to start unless its issuer URL is https, which needs a DNS name and a certificate. Set app_hostname and hosted_zone_id, or set enable_mcp = false."
     }
   }
 

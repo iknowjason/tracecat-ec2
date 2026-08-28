@@ -195,8 +195,16 @@ if [[ -f .env ]]; then
 fi
 
 log "Running env.sh non-interactively"
+# With TLS the load balancer terminates HTTPS and forwards plain HTTP to Caddy,
+# so the stack still listens on 80 — but every URL it advertises must be https,
+# or the browser blocks mixed content and the MCP server refuses its own issuer.
+if [[ "${ENABLE_TLS:-n}" == "y" ]]; then
+    url_answer="https://${APP_HOST}"
+else
+    url_answer="$APP_HOST"
+fi
 printf '%s\n%s\n%s\n%s\n' \
-    "$PRODUCTION_MODE" "$APP_HOST" "$POSTGRES_SSL" "$SUPERADMIN_EMAIL" \
+    "$PRODUCTION_MODE" "$url_answer" "$POSTGRES_SSL" "$SUPERADMIN_EMAIL" \
     | bash ./env.sh || fail "env.sh exited non-zero"
 
 [[ -f .env ]] || fail "env.sh did not produce a .env file"
@@ -255,20 +263,6 @@ if [[ -z "$origins" ]]; then
 fi
 log "  TRACECAT__ALLOW_ORIGINS is ${origins}"
 
-# ── Configure the MCP server ───────────────────────────────────────────────
-# Tracecat's mcp container is an OIDC proxy — it forwards authorization to an
-# external IdP rather than issuing tokens itself. Without an issuer it raises
-#
-#   OIDC_ISSUER must be configured for the MCP server.
-#
-# retries three times, exits, and crash-loops under `restart: on-failure:3`.
-# Caddy then answers an empty-bodied 502 on /mcp while every other route is
-# fine, which reads like a routing fault and is not one.
-#
-# env.sh does not prompt for any of this, so the values come from Terraform via
-# deploy.env. There is nothing to generate: they identify a client registered
-# with someone else's identity provider.
-
 # Replace a key outright rather than sed-substituting into it: the values are
 # operator-supplied and may contain characters that are meaningful in a sed
 # replacement. Only the key, which is a fixed literal, reaches sed here.
@@ -287,6 +281,65 @@ dotenv_set() {
     sed -i "/^${key}=/d" .env
     printf "%s='%s'\n" "$key" "$value" >> .env
 }
+
+# ── Turn on TLS ────────────────────────────────────────────────────────────
+# Caddy gets its own certificate from Let's Encrypt. Setting BASE_DOMAIN to a
+# hostname is what switches its automatic HTTPS on: it then listens on 443 and
+# redirects 80, serving the ACME challenge there. env.sh leaves BASE_DOMAIN as
+# ":${PUBLIC_APP_PORT}", a port-only address, which serves plain HTTP forever.
+# The override is assembled from fragments just before the stack comes up. Two
+# sections contribute services to it, and a YAML document cannot carry two
+# top-level "services:" keys — appending one would silently discard the other.
+rm -f docker-compose.override.yml "${INSTALL_DIR}/.override.services" "${INSTALL_DIR}/.override.volumes"
+if [[ "${ENABLE_TLS:-n}" == "y" ]]; then
+    dotenv_set PUBLIC_APP_PORT 443
+    dotenv_set BASE_DOMAIN "$APP_HOST"
+    app_port=443
+    log "  TLS on: Caddy will request a certificate for ${APP_HOST}"
+
+    # Caddy global options have to be the first block in the file.
+    if ! grep -q "^{" Caddyfile; then
+        # Defaulted rather than bare: the script runs under `set -u`, and an
+        # instance whose deploy.env predates this variable would otherwise die
+        # here rather than fall back.
+        acme_email="${ACME_EMAIL:-$SUPERADMIN_EMAIL}"
+        printf '{\n\temail %s\n}\n\n%s' "$acme_email" "$(cat Caddyfile)" > Caddyfile.new
+        mv Caddyfile.new Caddyfile
+        log "  ACME account email is ${acme_email}"
+    fi
+
+    # Two things the stock compose file does not do: publish 80 (it publishes
+    # PUBLIC_APP_PORT only, now 443) and keep Caddy's /data across container
+    # recreates. Without the volume every recreate re-issues the certificate,
+    # and Let's Encrypt allows five identical certificates a week.
+    cat >> "${INSTALL_DIR}/.override.services" <<EOF
+  caddy:
+    ports:
+      - "80:80"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+EOF
+    cat >> "${INSTALL_DIR}/.override.volumes" <<EOF
+  caddy-data:
+  caddy-config:
+EOF
+fi
+
+# ── Configure the MCP server ───────────────────────────────────────────────
+# Tracecat's mcp container is an OIDC proxy — it forwards authorization to an
+# external IdP rather than issuing tokens itself. Without an issuer it raises
+#
+#   OIDC_ISSUER must be configured for the MCP server.
+#
+# retries three times, exits, and crash-loops under `restart: on-failure:3`.
+# Caddy then answers an empty-bodied 502 on /mcp while every other route is
+# fine, which reads like a routing fault and is not one.
+#
+# env.sh does not prompt for any of this, so the values come from Terraform via
+# deploy.env. There is nothing to generate: they identify a client registered
+# with someone else's identity provider.
+
 
 # The compose file falls back to ${PUBLIC_URL:-http://localhost:${PUBLIC_APP_PORT:-80}}
 # for this, and env.sh sets PUBLIC_APP_URL — not PUBLIC_URL. So left alone the
@@ -310,30 +363,16 @@ if [[ -n "$OIDC_ISSUER" ]]; then
     log "  OIDC scopes: ${OIDC_SCOPES} (the server adds offline_access itself)"
     mcp_configured=1
 elif [[ "${BUILTIN_IDP:-n}" == "y" ]]; then
-    # No external issuer, so deploy one. Dex is used rather than Cognito, Okta
-    # or Auth0 because all three require callback URLs to be https:// (only
-    # http://localhost is exempt) and this box serves plain HTTP on an IP
-    # address. Dex accepts an http issuer.
-    #
-    # The issuer has to be a single string that BOTH the operator's browser and
-    # the mcp container can reach, because fastmcp rejects a discovery document
-    # whose `issuer` does not match. An IP literal cannot satisfy both: the
-    # container's route to this instance's own public address leaves through the
-    # internet gateway and returns with a source address the security group does
-    # not allow. So the issuer uses a hostname, and the mcp container gets an
-    # /etc/hosts entry sending it to the Docker host instead — the browser
-    # resolves the name publicly, the container never leaves the box.
-    idp_port="${MCP_IDP_PORT:-5556}"
-    if [[ "$APP_HOST" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
-        # nip.io resolves a-b-c-d.nip.io to a.b.c.d. Only the browser leg
-        # depends on it; the container is short-circuited by extra_hosts.
-        idp_host="${APP_HOST//./-}.nip.io"
-        log "  This instance has no DNS name, so the IdP issuer uses ${idp_host}"
-    else
-        idp_host="$APP_HOST"
-    fi
+    # The MCP SDK validates its own issuer URL and rejects anything that is not
+    # https (mcp/server/auth/routes.py, RFC 8414, localhost the only exemption).
+    # Terraform refuses this combination too; this is the second line of defence.
+    [[ "${ENABLE_TLS:-n}" == "y" ]] \
+        || fail "the MCP server needs an https issuer, so the built-in provider requires app_hostname. Set it, or set enable_mcp = false."
 
-    idp_issuer="http://${idp_host}:${idp_port}/dex"
+    # Dex sits behind Caddy on the shared network rather than on a port of its
+    # own: one certificate, one open port, and the issuer is simply a path on
+    # the public URL.
+    idp_issuer="${got_url}/dex"
     idp_client_id="tracecat-mcp"
     idp_client_secret="$(openssl rand -hex 32)"
     idp_password="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
@@ -359,7 +398,7 @@ issuer: ${idp_issuer}
 storage:
   type: memory
 web:
-  http: 0.0.0.0:${idp_port}
+  http: 0.0.0.0:5556
 oauth2:
   skipApprovalScreen: true
 staticClients:
@@ -394,25 +433,49 @@ EOF
         log "  WARNING: could not read the dex image's uid; config left 0644"
     fi
 
-    cat > "${INSTALL_DIR}/docker-compose.override.yml" <<EOF
-# Generated by tracecat-bootstrap: the built-in identity provider for /mcp.
-services:
+    cat >> "${INSTALL_DIR}/.override.services" <<EOF
   dex:
     image: ${MCP_IDP_IMAGE:-ghcr.io/dexidp/dex:v2.45.1}
     restart: unless-stopped
     command: ["dex", "serve", "/etc/dex/config.yaml"]
     volumes:
       - ./dex/config.yaml:/etc/dex/config.yaml:ro
-    ports:
-      - "${idp_port}:${idp_port}"
+    networks:
+      - core
 
   mcp:
+    # Reach Caddy on this box rather than out through the internet gateway and
+    # back: traffic to our own public address returns with a source the security
+    # group rejects. The hostname is what makes this possible — the certificate
+    # matches it either way, so TLS still verifies.
     extra_hosts:
-      - "${idp_host}:host-gateway"
+      - "${APP_HOST}:host-gateway"
     depends_on:
       dex:
         condition: service_started
 EOF
+
+    # Caddy fronts dex, so the route has to exist. Inserted before the catch-all
+    # to the UI; if upstream reshapes the Caddyfile this fails loudly rather
+    # than silently producing a stack with no /dex.
+    grep -q "reverse_proxy http://ui:3000" Caddyfile \
+        || fail "Caddyfile no longer ends with the UI catch-all; the /dex route cannot be placed"
+    python3 - "$PWD/Caddyfile" <<'PYDEX'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+anchor = "\treverse_proxy http://ui:3000"
+route = (
+    "\t# Dex, the identity provider behind /mcp. Path preserved: dex derives its\n"
+    "\t# endpoint paths from the issuer, which ends in /dex.\n"
+    "\thandle /dex* {\n"
+    "\t\treverse_proxy http://dex:5556\n"
+    "\t}\n\n"
+)
+open(path, "w").write(text.replace(anchor, route + anchor, 1))
+PYDEX
+    grep -q "http://dex:5556" Caddyfile || fail "failed to add the /dex route to the Caddyfile"
+    log "  Caddy will serve dex at ${idp_issuer}"
 
     dotenv_set OIDC_ISSUER "$idp_issuer"
     dotenv_set OIDC_CLIENT_ID "$idp_client_id"
@@ -430,16 +493,37 @@ else
     mcp_configured=0
 fi
 
+# ── Assemble the compose override ──────────────────────────────────────────
+if [[ -s "${INSTALL_DIR}/.override.services" ]]; then
+    {
+        echo "# Generated by tracecat-bootstrap."
+        echo "services:"
+        cat "${INSTALL_DIR}/.override.services"
+        if [[ -s "${INSTALL_DIR}/.override.volumes" ]]; then
+            echo
+            echo "volumes:"
+            cat "${INSTALL_DIR}/.override.volumes"
+        fi
+    } > "${INSTALL_DIR}/docker-compose.override.yml"
+    rm -f "${INSTALL_DIR}/.override.services" "${INSTALL_DIR}/.override.volumes"
+    docker compose config >/dev/null 2>&1 \
+        || fail "the generated docker-compose.override.yml is not valid; see ${INSTALL_DIR}/docker-compose.override.yml"
+    log "Wrote docker-compose.override.yml and compose accepted it"
+fi
+
 # ── Bring the stack up ─────────────────────────────────────────────────────
 log "Starting the Tracecat stack (this pulls ~15 images and takes a few minutes)"
 docker compose up -d || fail "docker compose up failed"
 
 # ── Wait until it actually answers ─────────────────────────────────────────
-log "Waiting for the UI to respond on port ${app_port}"
+# Probe port 80 either way: with TLS Caddy answers there with a 308 to https,
+# which is proof enough that it is up, and https://localhost would fail the
+# certificate's hostname.
+log "Waiting for the UI to respond"
 ready=0
 for i in $(seq 1 90); do
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-        "http://localhost:${app_port}/" || echo 000)
+        "http://localhost:80/" || echo 000)
     if [[ "$code" =~ ^(200|301|302|307|308)$ ]]; then
         log "UI responded with HTTP ${code} after ~$((i * 10))s"
         ready=1
@@ -454,21 +538,32 @@ if (( ready == 0 )); then
     fail "stack did not become healthy — see 'docker compose logs' in ${INSTALL_DIR}"
 fi
 
-# ── Confirm the mcp container can actually reach the built-in IdP ──────────
-# fastmcp fetches the discovery document at startup and refuses to serve if the
-# issuer does not match, so a wrong answer here is the difference between /mcp
-# working and another empty 502. Checked from a container with the same
-# /etc/hosts override the mcp service gets, which is the path that matters.
+# ── Confirm the discovery document is reachable the way the mcp container ──
+# ── will reach it ──────────────────────────────────────────────────────────
+# fastmcp fetches this at startup and refuses to serve if the issuer does not
+# match, so a wrong answer here is the difference between /mcp working and
+# another empty 502. Run from a container with the same /etc/hosts override the
+# mcp service gets, so this is the exact path that matters. Retried, because
+# Caddy may still be completing the ACME handshake.
 if (( mcp_builtin == 1 )); then
-    log "Checking the discovery document is reachable from a container"
-    if docker run --rm --add-host "${idp_host}:host-gateway" curlimages/curl:8.10.1 \
-        -fsS --max-time 10 "${idp_issuer}/.well-known/openid-configuration" >/dev/null 2>&1; then
-        log "  ${idp_issuer} answers"
-    else
-        log "  WARNING: could not fetch ${idp_issuer}/.well-known/openid-configuration"
-        log "  from inside a container. The mcp container will fail the same way and"
-        log "  /mcp will return 502. Check 'docker compose logs dex' and confirm the"
-        log "  dex container published port ${idp_port}."
+    log "Checking the discovery document is reachable at ${idp_issuer}"
+    discovery_ok=0
+    for i in $(seq 1 18); do
+        if docker run --rm --add-host "${APP_HOST}:host-gateway" curlimages/curl:8.10.1 \
+            -fsS --max-time 10 "${idp_issuer}/.well-known/openid-configuration" 2>/dev/null \
+            | grep -q "\"issuer\"[[:space:]]*:[[:space:]]*\"${idp_issuer}\""; then
+            discovery_ok=1
+            log "  reachable, and the issuer matches after ~$((i * 10))s"
+            break
+        fi
+        sleep 10
+    done
+    if (( discovery_ok == 0 )); then
+        log "  WARNING: could not fetch a matching discovery document from"
+        log "  ${idp_issuer} within three minutes. The mcp container will fail"
+        log "  the same way and /mcp will return 502. Check that Caddy actually"
+        log "  obtained a certificate ('docker compose logs caddy'), that"
+        log "  ${APP_HOST} resolves to this instance, and 'docker compose logs dex'."
         mcp_configured=0
         mcp_failure=idp_unreachable
     fi

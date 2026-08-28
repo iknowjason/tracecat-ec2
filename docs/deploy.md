@@ -207,30 +207,40 @@ looked up by the email in the OIDC token. Until you have signed up in the UI as
 Then point a client at `http://<ip>/mcp`; it runs an OAuth flow, sends you to Dex, and
 comes back with a token.
 
-### Why Dex and not Cognito
+### Why TLS is not optional here
 
-Cognito, Okta and Auth0 all require callback URLs to be `https://`, with an exception
-only for `http://localhost`. This deploy serves plain HTTP on an IP address, and the
-proxy's callback is `http://<ip>/auth/callback`, so none of them will register it until
-the instance has a DNS name and a certificate. Dex accepts an `http` issuer.
+The MCP server validates its own issuer URL and refuses anything that is not
+https. That check is in the MCP SDK (`mcp/server/auth/routes.py`), is hard-coded per
+RFC 8414, and exempts only `localhost` — so no choice of identity provider avoids it.
+Over plain HTTP the container logs `Issuer URL must be HTTPS` and crash-loops. This is
+why `enable_mcp` requires `app_hostname`, and Terraform says so at plan time.
 
-### The issuer hostname
+Caddy obtains a Let's Encrypt certificate for that name on first boot. Two consequences
+worth knowing:
 
-The issuer is `http://<ip-with-dashes>.nip.io:5556/dex`, not the bare IP, and that is
-deliberate. fastmcp rejects a discovery document whose `issuer` does not match the URL it
-fetched, so the browser and the `mcp` container must use the same string — and an IP
-literal cannot serve both. A container reaching this instance's own public address goes
-out through the internet gateway and comes back with a source address the security group
-does not allow. With a hostname, the compose override gives `mcp` an `/etc/hosts` entry
-(`extra_hosts: <host>:host-gateway`) pointing at the Docker host, so the container
-resolves it locally and never leaves the box, while your browser resolves it publicly via
-nip.io.
+- **Port 80 opens to the internet.** Let's Encrypt validates HTTP-01 from addresses it
+  does not publish, so the rule cannot be narrowed. Caddy serves the challenge there and
+  redirects everything else to 443, which stays restricted to `allowed_cidrs`.
+- **The name must resolve before the bootstrap runs.** Set `hosted_zone_id` and Terraform
+  writes the A record in the same apply; otherwise create it yourself first.
 
-The bootstrap verifies this before declaring success: it fetches the discovery document
-from inside a container with the same override, and warns loudly if that fails.
+### Why Dex and not a hosted provider
 
-Port `5556` is opened to the same CIDRs as the UI, because your *browser* is redirected
-there during sign-in. Change it with `mcp_idp_port`.
+Cognito, Okta and Auth0 all require callback URLs to be https, which the certificate
+above satisfies — so any of them would work now. Dex is the default because it needs no
+external account and no second set of credentials: the client secret is generated on the
+instance and never leaves it.
+
+### The issuer
+
+Dex is served through Caddy at `/dex`, so the issuer is `https://<your-name>/dex` — one
+certificate, one open port, no second listener.
+
+The `mcp` container reaches it through an `/etc/hosts` entry pointing at the Docker host
+(`extra_hosts: <name>:host-gateway`) rather than out through the internet gateway and
+back, because traffic to this instance's own public address returns with a source the
+security group rejects. The certificate matches the name either way, so TLS still
+verifies. The bootstrap checks this path from a container before declaring success.
 
 Dex uses in-memory storage, so restarting that container — or the instance — signs every
 MCP client out. Re-running the OAuth flow is all that is needed.

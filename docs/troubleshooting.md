@@ -158,7 +158,7 @@ failed. Reproduce it:
 
 ```bash
 . /etc/tracecat/READY
-docker run --rm --add-host "$(echo "$mcp_issuer" | awk -F[/:] '{print $4}'):host-gateway" \
+docker run --rm --add-host "$(echo "$mcp_issuer" | awk -F/ '{print $3}'):host-gateway" \
   curlimages/curl:8.10.1 -fsS "$mcp_issuer/.well-known/openid-configuration"
 ```
 
@@ -198,6 +198,25 @@ curl -fsS "$mcp_issuer/.well-known/openid-configuration" | head -c 200
 
 Note that this reproduces only on Linux. Docker Desktop on macOS virtualises bind-mount
 ownership, so the identical config mounted there starts fine.
+
+## `mcp` logs "Issuer URL must be HTTPS"
+
+Not fixable by configuration. The MCP SDK validates its own issuer URL against RFC 8414
+and exempts only `localhost`, so `/mcp` cannot work over plain HTTP no matter which
+identity provider you use. Set `app_hostname` and `hosted_zone_id` and re-apply, or set
+`enable_mcp = false` to deploy without it.
+
+Check what the certificate is doing:
+
+```bash
+cd /opt/tracecat
+sudo docker compose logs caddy | grep -i "certificate\|acme\|error" | tail -20
+```
+
+Caddy needs port 80 reachable from the internet for the ACME challenge and the name
+resolving to this instance. If it is re-issuing on every restart, the `caddy-data` volume
+is missing from `docker-compose.override.yml` — Let's Encrypt allows five identical
+certificates a week.
 
 ## `/mcp` authenticates and then returns 401
 

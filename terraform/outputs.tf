@@ -10,7 +10,7 @@ output "public_ip" {
 
 output "app_url" {
   description = "Open this in a browser once the bootstrap finishes."
-  value       = "http://${local.app_host != "" ? local.app_host : (var.allocate_eip ? aws_eip.this[0].public_ip : aws_instance.this.public_ip)}"
+  value       = "${local.enable_tls ? "https" : "http"}://${local.app_host != "" ? local.app_host : (var.allocate_eip ? aws_eip.this[0].public_ip : aws_instance.this.public_ip)}"
 }
 
 output "instance_id" {
@@ -41,9 +41,9 @@ output "watch_bootstrap_command" {
 output "mcp_url" {
   description = "MCP endpoint, or a note explaining why there isn't one."
   value = (
-    var.enable_mcp || var.oidc_issuer != null
-    ? "http://${local.app_host != "" ? local.app_host : (var.allocate_eip ? aws_eip.this[0].public_ip : aws_instance.this.public_ip)}/mcp"
-    : "MCP is disabled (enable_mcp = false)"
+    (var.enable_mcp || var.oidc_issuer != null) && local.enable_tls
+    ? "https://${var.app_hostname}/mcp"
+    : "MCP is not available: it needs app_hostname set for TLS"
   )
 }
 

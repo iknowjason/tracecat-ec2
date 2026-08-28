@@ -147,12 +147,23 @@ variable "app_hostname" {
   description = <<-DESC
     Hostname the browser will use, if you have one (e.g. tracecat.example.com).
 
-    Leave null to use the instance's public IP address. Set this only once the
-    DNS record actually points at the instance — Tracecat bakes it into
-    PUBLIC_APP_URL and rejects mismatched browser origins.
+    Leave null to use the instance's public IP address.
+
+    Setting this turns on TLS, which is what makes /mcp usable: Caddy obtains a
+    Let's Encrypt certificate for the name on first boot and the stack moves to
+    https. Port 80 is then opened to the internet for the ACME challenge, while
+    443 stays restricted to allowed_cidrs.
+
+    Tracecat bakes this into PUBLIC_APP_URL and rejects mismatched browser
+    origins, so it must be the name you actually browse to.
   DESC
   type        = string
   default     = null
+
+  validation {
+    condition     = var.app_hostname == null || can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.app_hostname))
+    error_message = "app_hostname must be a bare DNS name such as tracecat.example.com — no scheme, port or trailing dot."
+  }
 }
 
 # ── MCP server ───────────────────────────────────────────────────────────────
@@ -178,34 +189,51 @@ variable "app_hostname" {
 # instance has a DNS name and a certificate. Dex accepts an http issuer, so it
 # works on the box as shipped.
 
+# ── TLS ──────────────────────────────────────────────────────────────────────
+# The MCP server refuses to start unless its own issuer URL is https. That check
+# lives in the MCP SDK (mcp/server/auth/routes.py::validate_issuer_url), is
+# hard-coded per RFC 8414, and exempts only localhost — so no choice of identity
+# provider avoids it. If you want /mcp, this instance needs a DNS name and a
+# certificate; everything else works fine over plain HTTP.
+
+variable "hosted_zone_id" {
+  description = <<-DESC
+    Route 53 hosted zone ID that app_hostname belongs to, e.g. "Z1234567890ABC".
+
+    Set alongside app_hostname and Terraform writes the A record pointing at the
+    instance's Elastic IP. Leave null and create that record yourself — it has
+    to resolve before Caddy's first ACME attempt during the bootstrap.
+  DESC
+  type        = string
+  default     = null
+}
+
+variable "acme_email" {
+  description = <<-DESC
+    Contact address for the Let's Encrypt account. Defaults to superadmin_email.
+
+    Expiry notices go here. It is not published, but it is sent to the CA.
+  DESC
+  type        = string
+  default     = null
+}
+
 variable "enable_mcp" {
   description = <<-DESC
     Deploy the built-in Dex identity provider so the MCP server starts and
     http://<host>/mcp works without any external account.
 
-    Dex is published on mcp_idp_port and its login is generated at boot; the
+    Dex is served through Caddy at /dex and its login is generated at boot; the
     bootstrap prints the credentials and writes them to /etc/tracecat/READY.
+
+    Requires app_hostname: the MCP server will not start without an https
+    issuer, whichever provider supplies it.
 
     Ignored when oidc_issuer is set — an explicit issuer always wins. Set this
     false and leave oidc_issuer null to deploy without the MCP server at all.
   DESC
   type        = bool
   default     = true
-}
-
-variable "mcp_idp_port" {
-  description = <<-DESC
-    Port the built-in Dex identity provider listens on, reachable from the same
-    CIDRs as the UI. The browser is redirected here during MCP sign-in, so it
-    must be reachable from wherever you run the MCP client.
-  DESC
-  type        = number
-  default     = 5556
-
-  validation {
-    condition     = var.mcp_idp_port > 1024 && var.mcp_idp_port < 65536
-    error_message = "mcp_idp_port must be between 1025 and 65535."
-  }
 }
 
 variable "mcp_idp_image" {
@@ -225,8 +253,7 @@ variable "oidc_issuer" {
     https://example.okta.com/oauth2/default or https://accounts.google.com.
 
     Leave null to use the built-in Dex provider (see enable_mcp). Setting this
-    replaces Dex entirely: no Dex container is deployed and mcp_idp_port is not
-    opened.
+    replaces Dex entirely and no Dex container is deployed.
 
     The issuer must serve /.well-known/openid-configuration, the instance needs
     outbound access to reach it, and the client registered there must allow

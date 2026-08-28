@@ -30,12 +30,13 @@ roughly 15 containers: API, worker, executor, agent worker, agent executor, MCP 
 UI, Caddy, two PostgreSQL instances, Temporal, MinIO and Redis.
 
 The MCP server is an OIDC proxy and will not start without an identity provider, so this
-module deploys one: a Dex container with a generated secret and a single seeded login,
-which makes `/mcp` work on a bare deploy. Read the credentials with
-`sudo grep ^mcp_ /etc/tracecat/READY`, and sign up in the UI first — MCP authorises
-against an existing Tracecat user. Point it at your own IdP with `oidc_issuer`, or turn
-it off with `enable_mcp = false`; see
-[docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
+module deploys one: a Dex container with a generated secret and a single seeded login.
+It also **requires TLS** — the MCP server rejects its own issuer URL unless it is https,
+whatever the provider — so `/mcp` needs `app_hostname` and `hosted_zone_id`, and Caddy
+takes a Let's Encrypt certificate on first boot. Read the credentials with
+`sudo grep ^mcp_ /etc/tracecat/READY`, and sign up in the UI first, since MCP authorises
+against an existing Tracecat user. Deploy without any of it using `enable_mcp = false`;
+see [docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
 
 ---
 
