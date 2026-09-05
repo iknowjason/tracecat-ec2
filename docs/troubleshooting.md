@@ -320,3 +320,30 @@ terraform destroy && terraform apply
 ```
 
 Nothing is preserved. That is the fastest path when the instance is in an unclear state.
+
+## The apply fails on user_data size
+
+EC2 caps `user_data` at 16,384 bytes and the bootstrap script travels inside it,
+gzipped and base64-encoded. The failure lands on `aws_instance` creation — after the
+EIP and the DNS record already exist — so you are left cleaning up a partial stack.
+
+Check before you apply:
+
+```bash
+./scripts/preflight.sh
+```
+
+It reports the rendered size against the cap, and warns past 90%.
+
+Terraform drops every line of `bootstrap.sh` that starts with `#` in the **first
+column** (the shebang excepted) on the way in — see `locals.bootstrap_script` in
+`main.tf`. That is worth about 4.5 KB. The script on disk keeps its comments; only
+the copy inside `user_data` loses them.
+
+**Consequence to remember when editing the bootstrap:** anything a heredoc writes
+out must not start a line with `#` at column zero, or that line disappears from the
+generated file with no warning. Indent it — YAML, Caddyfile and shell all accept an
+indented comment. `preflight.sh` fails if you forget.
+
+If trimming is not enough, the script has outgrown `user_data`: fetch it from S3 at
+boot, or bake it into an AMI.

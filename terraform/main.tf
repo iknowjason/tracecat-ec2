@@ -48,6 +48,21 @@ locals {
 
   # TLS is on exactly when there is a name to put on a certificate.
   enable_tls = var.app_hostname != null
+
+  # EC2 caps user_data at 16,384 bytes and the bootstrap script sits inside it,
+  # so its comments are dropped on the way in. They are the bulk of the file:
+  # keeping them costs ~4.5 KB of headroom and has twice now put an apply within
+  # a few hundred bytes of failing. The script on disk keeps every one of them.
+  #
+  # The rule is deliberately narrow — only a "#" in the FIRST column, and never
+  # the shebang. Anything a heredoc writes out is indented, so generated configs
+  # keep their own comments. THAT IS LOAD-BEARING: a line starting "#" at column
+  # zero inside a heredoc would be silently deleted from the generated file.
+  # scripts/preflight.sh checks this, along with the rendered size.
+  bootstrap_script = join("\n", [
+    for line in split("\n", file("${path.module}/../scripts/bootstrap.sh")) :
+    line if !startswith(line, "#") || startswith(line, "#!")
+  ])
   acme_email = var.acme_email != null ? var.acme_email : var.superadmin_email
 
   # Deploy Dex only when the MCP server is wanted and no external issuer was
@@ -280,7 +295,7 @@ resource "aws_instance" "this" {
     tracecat_version = var.tracecat_version
     superadmin_email = var.superadmin_email
     app_host         = local.app_host
-    bootstrap_gz_b64 = base64gzip(file("${path.module}/../scripts/bootstrap.sh"))
+    bootstrap_gz_b64 = base64gzip(local.bootstrap_script)
 
     # Empty string rather than null: these land in a shell file that the
     # bootstrap sources, and "null" would be written literally.
