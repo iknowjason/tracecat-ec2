@@ -262,6 +262,59 @@ someone completes the sign-up form in the UI. Sign in at `http://<ip>/` as
 sudo grep -E '^(superadmin_email|mcp_login_email)' /etc/tracecat/READY
 ```
 
+## The Dex sign-in rejects the password
+
+You reach a login form after authorizing the MCP client, type the password you use for
+the Tracecat UI, and it fails with no useful explanation.
+
+That form belongs to **Dex**, not Tracecat. Both accounts use the same email address and
+have different passwords:
+
+- the **Tracecat** password is whatever you chose in the UI sign-up form;
+- the **Dex** password is generated at first boot and stored only on the instance.
+
+```bash
+sudo grep ^mcp_ /etc/tracecat/READY
+```
+
+Dex has no access to Tracecat's user database, so the UI password can never work there.
+If `/etc/tracecat/READY` has no `mcp_` lines, the deploy did not use the built-in
+provider — check `mcp_builtin_idp` in the same file.
+
+## The OAuth flow ends on a `localhost` page
+
+That is the flow working. Loopback redirection is how native applications receive an
+authorization code (RFC 8252): Dex redirects to `https://<host>/auth/callback`, the only
+URI it has registered, and the OIDC proxy then hands the code to the client's own
+short-lived local listener. Do not reconfigure Dex to point somewhere public.
+
+If the page reports **connection refused**, the listener had already closed before the
+browser got there. Common causes: a long pause at the Dex form, opening the link in a
+browser on a different machine than the client, or restarting the client mid-flow. Start
+over and finish promptly:
+
+```bash
+claude mcp logout tracecat
+claude mcp login tracecat
+```
+
+See [mcp-clients.md](mcp-clients.md) for the full four-hop flow.
+
+## MCP clients fail after a rebuild
+
+The endpoint URL is unchanged, so the client's server definition is still correct — but
+the Dex password, the Dex client secret and the OIDC proxy's in-memory client
+registrations were all regenerated. Clear the stored credentials rather than removing and
+re-adding the server:
+
+```bash
+claude mcp logout tracecat
+claude mcp login tracecat
+```
+
+A rebuild also empties Postgres, so sign up in the UI as `superadmin_email` again first
+or you will hit the 401 above.
+
 ## MCP clients are signed out after a reboot
 
 Expected. Dex stores sessions in memory, so restarting that container or the instance
@@ -312,6 +365,26 @@ aside to `.env.bak.<timestamp>` first. `env.sh` asks an extra "overwrite?" quest
 one is present; that does not currently misalign the piped answers, but only because the
 prompt reads a single character and the following prompt's default absorbs the leftover
 newline. Moving the file aside makes the sequence deterministic instead of coincidental.
+
+## Terraform cannot find AWS credentials under `sops exec-env`
+
+```bash
+sops exec-env secrets.enc.env 'aws sts get-caller-identity'
+```
+
+Run that first — it isolates the credential problem from Terraform. Three things account
+for most failures:
+
+- **The age key is not where sops looks.** On macOS that is
+  `~/Library/Application Support/sops/age/keys.txt`, not `~/.config/sops/age/keys.txt`.
+  Most tutorials print the Linux path and sops fails against it without saying so.
+- **The file does not end in `.env`.** `sops exec-env` has no `--input-type` flag and
+  infers the format from the extension, so `secrets.enc` cannot work — `secrets.enc.env`
+  can.
+- **`AWS_REGION` in the encrypted file is ignored.** The provider is pinned to
+  `var.aws_region`; set the region in `terraform.tfvars`.
+
+Full walkthrough: [secrets-sops.md](secrets-sops.md).
 
 ## Starting over completely
 

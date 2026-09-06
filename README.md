@@ -29,14 +29,37 @@ The result is the stack Tracecat documents at
 roughly 15 containers: API, worker, executor, agent worker, agent executor, MCP server,
 UI, Caddy, two PostgreSQL instances, Temporal, MinIO and Redis.
 
-The MCP server is an OIDC proxy and will not start without an identity provider, so this
-module deploys one: a Dex container with a generated secret and a single seeded login.
-It also **requires TLS** — the MCP server rejects its own issuer URL unless it is https,
-whatever the provider — so `/mcp` needs `app_hostname` and `hosted_zone_id`, and Caddy
-takes a Let's Encrypt certificate on first boot. Read the credentials with
-`sudo grep ^mcp_ /etc/tracecat/READY`, and sign up in the UI first, since MCP authorises
-against an existing Tracecat user. Deploy without any of it using `enable_mcp = false`;
-see [docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
+### The MCP server installs itself, identity provider included
+
+Tracecat's `mcp` container is an OIDC **proxy** — it issues no tokens of its own and will
+not start without an identity provider to forward authorization to. Upstream leaves that
+to you. This module does it for you, so a default `apply` produces a **working,
+authenticated MCP endpoint with nothing to register anywhere**:
+
+- a **Dex** container deployed alongside the stack, served through Caddy at `/dex`;
+- an OIDC client and secret **generated on the instance** — never in Terraform state,
+  never in `user_data`;
+- one seeded sign-in, using your `superadmin_email` and a password written to
+  `/etc/tracecat/READY`;
+- the redirect URI pre-registered, and the discovery document verified from inside a
+  container before the bootstrap reports success.
+
+It **requires TLS** — the MCP server rejects its own issuer URL unless it is https,
+whatever provider you choose — so `/mcp` needs `app_hostname` and `hosted_zone_id`, and
+Caddy takes a Let's Encrypt certificate on first boot.
+
+```bash
+terraform output mcp_credentials_command   # read the generated sign-in over SSM
+claude mcp add --transport http tracecat https://<app_hostname>/mcp
+```
+
+**Sign up in the UI first** — MCP authorises against an existing Tracecat user, so `/mcp`
+returns 401 until that account exists. Point your own provider at it with `oidc_issuer`,
+or turn the whole thing off with `enable_mcp = false`.
+
+Client setup, the OAuth flow, and what to do after a rebuild:
+[docs/mcp-clients.md](docs/mcp-clients.md). Design rationale:
+[docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
 
 ---
 
@@ -85,14 +108,21 @@ Full walkthrough: [docs/deploy.md](docs/deploy.md).
 | Permission to create EC2, VPC security groups, IAM roles and EIPs | The IAM role is only for SSM Session Manager |
 | A default VPC, **or** an existing VPC and public subnet | Pass `vpc_id` / `subnet_id` if you have no default VPC |
 | An email address | Becomes the Tracecat superadmin — the only required variable |
+| A DNS name you control, in Route 53 | Only for `/mcp`, which requires TLS. Set `app_hostname` and `hosted_zone_id` |
+| *Optional:* `sops` and `age` | To keep AWS credentials encrypted instead of exported — see [docs/secrets-sops.md](docs/secrets-sops.md) |
 
 ---
 
 ## Security posture
 
-This deployment serves **plain HTTP**. Tracecat's own documentation is explicit that an
-HTTP-only deployment should not be exposed to a public domain. The design follows from
-that:
+**Whether this serves HTTPS depends on one variable.** Set `app_hostname` and Caddy
+takes a Let's Encrypt certificate on first boot, serving the UI on 443; leave it unset
+and the stack serves plain HTTP on port 80. Tracecat's own documentation is explicit that
+an HTTP-only deployment should not be exposed to a public domain, so the HTTP mode is for
+evaluation from your own address — and `/mcp` is unavailable in it, because the MCP
+server rejects a non-https issuer whatever provider you use.
+
+Either way:
 
 - **Ingress is restricted to your own address by default.** Leave `allowed_cidrs` unset
   and Terraform looks up the public IP it is calling from and allows that `/32` only.
@@ -103,6 +133,10 @@ that:
   `enable_ssh = true` if you want port 22 anyway.
 - **IMDSv2 is required** (`http_tokens = "required"`). The bootstrap uses the token flow.
 - **The root volume is encrypted.**
+- **With TLS on, port 80 — and only port 80 — opens to the internet.** Let's Encrypt
+  validates HTTP-01 from addresses it does not publish, so that rule cannot be narrowed.
+  Caddy serves the challenge there and redirects everything else to 443, which stays
+  restricted to `allowed_cidrs`.
 - **Secrets are generated on the instance**, by Tracecat's own `env.sh`, and never pass
   through Terraform state.
 
@@ -137,6 +171,8 @@ with an attached EIP does incur a small hourly charge.
 | | |
 |---|---|
 | [docs/deploy.md](docs/deploy.md) | Full deployment walkthrough and first login |
+| [docs/mcp-clients.md](docs/mcp-clients.md) | Connecting Claude Code and other MCP clients to `/mcp` |
+| [docs/secrets-sops.md](docs/secrets-sops.md) | Running Terraform with sops + age instead of plaintext credentials |
 | [docs/architecture.md](docs/architecture.md) | What gets built and why, including the unattended-install design |
 | [docs/operations.md](docs/operations.md) | Logs, backups, upgrades, going to production, teardown |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | When the URL does not answer |

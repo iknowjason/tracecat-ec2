@@ -55,3 +55,17 @@ output "mcp_credentials_command" {
     : "Not applicable: no built-in identity provider was deployed"
   )
 }
+
+# Same secret, fetched through Run Command instead of an interactive session, for
+# anyone without the session-manager-plugin installed. The tradeoff is real:
+# start-session streams the password and persists nothing, while Run Command keeps
+# StandardOutputContent in SSM's invocation history (and the console) for 30 days.
+# Prefer mcp_credentials_command unless the plugin is in the way.
+output "mcp_credentials_command_no_plugin" {
+  description = "Read the generated MCP sign-in without the session-manager-plugin. Leaves the password in SSM command history."
+  value = (
+    local.builtin_idp
+    ? "cid=$(aws ssm send-command --region ${var.aws_region} --instance-ids ${aws_instance.this.id} --document-name AWS-RunShellScript --parameters 'commands=[\"grep ^mcp_ /etc/tracecat/READY\"]' --query Command.CommandId --output text) && aws ssm wait command-executed --region ${var.aws_region} --command-id \"$cid\" --instance-id ${aws_instance.this.id} && aws ssm get-command-invocation --region ${var.aws_region} --command-id \"$cid\" --instance-id ${aws_instance.this.id} --query StandardOutputContent --output text"
+    : "Not applicable: no built-in identity provider was deployed"
+  )
+}
