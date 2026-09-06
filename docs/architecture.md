@@ -191,8 +191,12 @@ only on success, which gives you a single file to check.
 
 ## What is deliberately not here
 
-- **TLS.** The stack serves HTTP on port 80. Terminating TLS properly means a domain, a
-  certificate and a Caddy config change — see [operations.md](operations.md#going-to-production).
+- **TLS without a domain.** Caddy terminates TLS automatically once `app_hostname` is
+  set, so HTTPS is built in — but it needs a name you control. There is no self-signed
+  fallback and no way to get a certificate for a bare IP, which is why `/mcp` (whose
+  issuer must be https) is unavailable on an IP-only deploy. `nip.io` and `sslip.io` do
+  not help: neither is on the Public Suffix List, so Let's Encrypt treats each as one
+  registered domain under a shared, chronically exhausted rate limit.
 - **RDS, or any managed data store.** Tracecat's compose stack runs its own PostgreSQL.
   Moving to RDS is a real production step and a different project.
 - **Backups.** Nothing is backed up. The instance is cattle; its database is not.

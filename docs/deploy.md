@@ -12,6 +12,11 @@ terraform version               # 1.6 or newer
 curl -s https://checkip.amazonaws.com   # your public address, for allowed_cidrs
 ```
 
+If those credentials are real rather than a throwaway sandbox, encrypt them instead of
+exporting them and run every command below as
+`sops exec-env secrets.enc.env 'terraform ...'` — see
+[secrets-sops.md](secrets-sops.md).
+
 You need permission to create EC2 instances, VPC security groups, IAM roles and
 instance profiles, and Elastic IPs. The IAM role this creates grants only
 `AmazonSSMManagedInstanceCore`, which is what makes shell access work without SSH.
@@ -93,10 +98,14 @@ allowed_cidrs = ["203.0.113.42/32", "198.51.100.0/24"]
 > if you are on an IPv6-only network the lookup fails with a clear error, because the
 > `/32` assumption is IPv4.
 
-`allowed_cidrs` rejects `0.0.0.0/0` through a variable validation. That is deliberate:
-this deployment serves unencrypted HTTP, and Tracecat's documentation warns against
-exposing an HTTP-only instance publicly. If you genuinely want it open, put TLS in front
-first and then edit the rule knowingly.
+`allowed_cidrs` rejects `0.0.0.0/0` through a variable validation. That is deliberate.
+Without `app_hostname` the deployment serves unencrypted HTTP, and Tracecat's
+documentation warns against exposing an HTTP-only instance publicly. Even with TLS on,
+this is a single instance with no WAF and no rate limiting in front of it, so the rule
+stays: opening it to the world takes a knowing edit rather than an oversight.
+
+The one exception is automatic and narrow — with TLS on, port 80 opens to `0.0.0.0/0` for
+the ACME HTTP-01 challenge. Port 443 stays restricted to `allowed_cidrs`.
 
 Worth knowing about the rest:
 
@@ -171,9 +180,13 @@ account.
 
 Also available:
 
-- `http://<ip>/api/docs` — the API reference
-- `http://<ip>/mcp` — the MCP endpoint, working out of the box. See below for the
-  sign-in credentials.
+- `/api/docs` — the API reference
+- `/mcp` — the MCP endpoint, working out of the box **when `app_hostname` is set**, since
+  it requires TLS. See below for the sign-in credentials, and
+  [mcp-clients.md](mcp-clients.md) for connecting a client.
+
+Both are on whatever `terraform output app_url` prints — `https://<app_hostname>` with
+TLS on, `http://<ip>` without.
 
 ## 5a. The MCP endpoint
 
@@ -204,8 +217,19 @@ sudo grep ^mcp_ /etc/tracecat/READY
 looked up by the email in the OIDC token. Until you have signed up in the UI as
 `superadmin_email`, `/mcp` authenticates you at Dex and then returns 401.
 
-Then point a client at `http://<ip>/mcp`; it runs an OAuth flow, sends you to Dex, and
-comes back with a token.
+Then point a client at `https://<app_hostname>/mcp`; it runs an OAuth flow, sends you to
+Dex, and comes back with a token.
+
+```bash
+claude mcp add --transport http tracecat https://<app_hostname>/mcp
+claude mcp login tracecat
+```
+
+**The password Dex asks for is not your Tracecat password.** Same email, two accounts:
+you choose the UI password at sign-up, while the Dex one is generated at boot and lives
+only in `/etc/tracecat/READY`. Full client walkthrough — including why the flow ends on a
+`localhost` URL, and what to run after a rebuild — in
+[mcp-clients.md](mcp-clients.md).
 
 ### Why TLS is not optional here
 
@@ -294,7 +318,9 @@ Terraform state, not in this repository. Losing them means losing every stored c
 and every webhook.
 
 Copy them somewhere safe before you do anything else with the instance. See
-[operations.md](operations.md#backups).
+[operations.md](operations.md#backups), or
+[secrets-sops.md](secrets-sops.md#storing-the-instances-own-secrets-the-same-way) for a
+one-liner that pulls them off the instance and encrypts them in place.
 
 ---
 

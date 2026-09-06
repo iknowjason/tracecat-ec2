@@ -61,6 +61,10 @@ sudo cat /opt/tracecat/.env
 in Terraform state and not in this repository. Without them the database is unreadable
 and every webhook breaks. Copy the file into a password manager or a secrets store today.
 
+If you already run Terraform through `sops exec-env`, encrypt them to the same age key
+and commit the result — see
+[secrets-sops.md](secrets-sops.md#storing-the-instances-own-secrets-the-same-way).
+
 ### The database
 
 ```bash
@@ -128,9 +132,11 @@ nothing at all), but it makes the plan output worth reading.
 This deployment is fine for evaluating Tracecat in your own account. Before it handles
 anything real:
 
-1. **Put TLS in front of it.** Get a domain, point it at the Elastic IP, set
-   `app_hostname`, and configure Caddy for automatic HTTPS. Modern browsers restrict
-   features on plain HTTP, and Tracecat's docs warn against HTTP-only on a public domain.
+1. **Turn TLS on.** Get a domain, set `app_hostname` and `hosted_zone_id`, and re-apply —
+   Terraform writes the A record and Caddy obtains a Let's Encrypt certificate on first
+   boot. Nothing else to configure. Modern browsers restrict features on plain HTTP,
+   Tracecat's docs warn against HTTP-only on a public domain, and `/mcp` does not work at
+   all without it.
 2. **Replace the default auth with SSO.** Email and password is a starting point;
    Tracecat supports OIDC and SAML.
 3. **Move PostgreSQL off the instance.** The compose stack runs its own database on the

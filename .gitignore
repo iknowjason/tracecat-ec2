@@ -19,6 +19,11 @@ crash.*.log
 *.pem
 *.key
 
+# sops + age: *.enc.env files are encrypted and safe to commit. Anything you
+# decrypt to a scratch file is not — name it *.plain.env so this rule catches it.
+*.plain.env
+keys.txt
+
 # Editors / OS
 .DS_Store
 .idea/
