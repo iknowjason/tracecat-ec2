@@ -153,7 +153,7 @@ sops exec-env ../secrets.enc.env 'terraform init'
 sops exec-env ../secrets.enc.env 'terraform plan'
 sops exec-env ../secrets.enc.env 'terraform apply'
 sops exec-env ../secrets.enc.env 'terraform output app_url'
-sops exec-env ../secrets.enc.env 'terraform output mcp_credentials_command'
+sops exec-env ../secrets.enc.env 'terraform output mcp_signin'
 sops exec-env ../secrets.enc.env 'terraform destroy'
 ```
 

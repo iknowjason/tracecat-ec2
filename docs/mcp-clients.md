@@ -1,77 +1,47 @@
 # Connecting an MCP client
 
-Tracecat exposes a Model Context Protocol server at `/mcp`. This module **installs and
-wires that server for you**, identity provider included — there is no separate OIDC setup
-step, no account to register with a hosted provider, and no client secret to paste
-anywhere.
+Tracecat exposes a Model Context Protocol server at `/mcp`, and **it needs no identity
+provider**. From Tracecat `1.0.0-beta.51` the MCP server authenticates against an OIDC
+issuer Tracecat runs itself, on the API server at `/api/oauth/mcp`, using a client secret
+derived from `USER_AUTH_SECRET` — a value `env.sh` already generates at first boot. There
+is nothing to register, nothing to configure, and no extra container.
 
-This page covers the client side: adding the server to Claude Code, getting through the
-OAuth flow, and the two or three things that reliably confuse people the first time.
+This page covers the client side: authenticating, the two ways to do it, and what to do
+after a rebuild.
 
-For *why* the server is built the way it is — the OIDC proxy, Dex, the HTTPS
-requirement — see [deploy.md § 5a](deploy.md#5a-the-mcp-endpoint).
+> **If `/mcp` returns 502, check your version first.** Before beta.51 the MCP server was
+> an OIDC *proxy* that refused to start without an external issuer. Upstream's tag names
+> do not sort by date — `1.0.0` was cut 2026-04-03, four months *before* `1.0.0-beta.51`
+> — so pinning `tracecat_version = "1.0.0"` gets you the old behaviour. See
+> [deploy.md § 5a](deploy.md#5a-the-mcp-endpoint).
 
 ---
 
-## What you get without asking for it
+## What the deploy gives you
 
-`enable_mcp` defaults to `true`, so a plain `terraform apply` with `app_hostname` and
-`hosted_zone_id` set produces a **working, authenticated MCP endpoint**:
-
-| | Done for you |
+| | |
 |---|---|
-| Identity provider | A [Dex](https://dexidp.io) container, deployed alongside the stack |
-| OIDC client | Registered in Dex as `tracecat-mcp`, with a client secret generated on the instance |
-| Client secret | `openssl rand -hex 32` at first boot — never in Terraform state, never in `user_data` |
-| Sign-in account | One static user, seeded with `superadmin_email` and a generated password |
+| Identity provider | Tracecat itself, at `https://<app_hostname>/api/oauth/mcp` |
+| Client secret | Derived from `USER_AUTH_SECRET` via HKDF — stable across restarts, never stored separately |
+| Browser sign-in | Your ordinary Tracecat account |
+| Token sign-in | Workspace-scoped personal access tokens, minted in the UI |
 | TLS | Caddy takes a Let's Encrypt certificate for `app_hostname` on first boot |
-| Issuer routing | Dex served through Caddy at `/dex` — one certificate, one open port |
-| Redirect URI | `https://<app_hostname>/auth/callback`, pre-registered in Dex |
-| Verification | The bootstrap fetches the discovery document *from inside a container* before declaring success |
+| Image pinning | `TRACECAT__IMAGE_TAG` written from `tracecat_version`, so code and images match |
 
-The alternative — pointing Tracecat at Okta, Auth0 or Cognito — is supported via
-`oidc_issuer` and documented in [deploy.md](deploy.md#using-your-own-identity-provider-instead).
-It is more work, not less: those providers need an account, an app registration, and a
-callback URL you can only register once this instance already has DNS and TLS.
+The one prerequisite is TLS. The MCP server refuses an issuer URL that is not https
+(localhost aside, per RFC 8414), and that check lives in the MCP SDK rather than in
+Tracecat, so no configuration avoids it. `enable_mcp` enforces it at plan time: it
+requires `app_hostname`.
 
----
+## 1. Create the Tracecat account first
 
-## 1. Read the sign-in
+MCP authorises by matching the email claim against an **existing Tracecat user**, and
+that user is only created when someone completes the sign-up form. Until then you will
+authenticate successfully and still get **401**.
 
-The password is generated on the instance at first boot and stored in one file, mode
-`0600`. Terraform prints the command:
+Open `https://<app_hostname>/`, sign up as `superadmin_email`, choose a password.
 
-```bash
-terraform output mcp_credentials_command
-```
-
-That is an SSM Session Manager command, which needs the `session-manager-plugin`
-installed locally. If you do not have it:
-
-```bash
-terraform output mcp_credentials_command_no_plugin
-```
-
-which uses SSM Run Command instead and needs only the AWS CLI. It leaves the password in
-SSM's invocation history for 30 days, so prefer the first one where you can.
-
-Either way you get:
-
-```
-mcp_login_email=you@example.com
-mcp_login_password=<20 characters>
-```
-
-## 2. Create the Tracecat account first
-
-MCP authorises by looking up the email claim against an **existing Tracecat user**, and
-that user is only created when someone completes the sign-up form. Until then Dex will
-authenticate you happily and `/mcp` will return **401**.
-
-Open `https://<app_hostname>/`, sign up as `superadmin_email`, choose a password. Do this
-before touching the MCP client.
-
-## 3. Add the server to Claude Code
+## 2. Add the server
 
 ```bash
 claude mcp add --transport http tracecat https://<app_hostname>/mcp
@@ -82,68 +52,51 @@ available everywhere, and `-s project` writes a checked-in `.mcp.json` for a tea
 
 > **Do not define the same server name in two scopes.** OAuth tokens are stored **per
 > endpoint**, so a `tracecat` at user scope pointing at an old host and another at project
-> scope pointing at the current one will authenticate independently and confuse you in
-> whichever directory resolves to the wrong one. `claude mcp list` reports this as a
-> `[Conflicting scopes]` diagnostic. Remove the one you do not want:
->
-> ```bash
-> claude mcp remove tracecat -s user
-> ```
+> scope pointing at the current one will authenticate independently. `claude mcp list`
+> reports this as a `[Conflicting scopes]` diagnostic. Remove the one you do not want with
+> `claude mcp remove tracecat -s user`.
 
-## 4. Authenticate
+## 3. Authenticate
 
-Start the flow from Claude Code with `/mcp`, or:
+Two ways in. Pick one.
+
+### Browser OAuth — sign in as yourself
+
+Start it with `/mcp` in a session, or:
 
 ```bash
 claude mcp login tracecat
 ```
 
-A browser opens. What happens next has four hops, and knowing them saves a lot of
-guessing:
+A browser opens, you approve the client, and you sign in with **your Tracecat
+credentials** — the same email and password you use for the UI. There is no second
+account and no separate password.
 
-```
-Claude Code
-   │  1.  https://<host>/authorize          ← Tracecat's fastmcp OIDC proxy
-   ▼
-Dex
-   │  2.  https://<host>/dex/auth           ← you type the password HERE
-   ▼
-Tracecat
-   │  3.  https://<host>/auth/callback      ← the only redirect URI Dex knows
-   ▼
-Claude Code
-      4.  http://localhost:<port>/callback  ← your client catching its own token
-```
+The flow ends by redirecting to `http://localhost:<port>/callback`. **That is correct** —
+loopback redirection is how native applications receive an authorization code
+([RFC 8252]), and your client is running a short-lived local listener to catch it.
 
-### The password at step 2 is not your Tracecat password
-
-This is the single most common failure. Both accounts use the **same email address**, and
-they have **different passwords**:
-
-| | Where it comes from | Where it is used |
-|---|---|---|
-| Tracecat superadmin password | You choose it in the UI sign-up form | Signing in to the web UI |
-| MCP / Dex password | Generated at first boot, in `/etc/tracecat/READY` | The Dex form during the OAuth flow |
-
-Dex has no access to Tracecat's user database. Typing the UI password into the Dex form
-fails, and the error does not explain why.
-
-### Ending on a `localhost` URL is correct
-
-Step 4 is loopback redirection for native applications ([RFC 8252]) — your MCP client
-runs a short-lived local listener and catches its own authorization code there. It is not
-a misconfiguration, and it must not be "fixed" by pointing Dex at a public URL: Dex's
-only registered redirect URI is `https://<host>/auth/callback`, and the hop after that
-belongs to the client.
-
-- Page says *"Authentication complete, you can close this window"* → you are done.
-- Page says **connection refused** → the flow was fine, but the client's listener had
-  already closed. Causes: too long at the Dex form, opening the link in a browser on a
-  different machine, or restarting the client mid-flow. Retry and finish promptly.
+- *"Authentication complete, you can close this window"* → done.
+- **Connection refused** → the flow was fine; the client's listener had already closed.
+  Causes: a long pause at the sign-in form, opening the link in a browser on a different
+  machine, or restarting the client mid-flow. Retry and finish promptly.
 
 [RFC 8252]: https://datatracker.ietf.org/doc/html/rfc8252#section-7.3
 
-## 5. Confirm
+### Personal access token — no browser
+
+For headless clients, CI, or anywhere the loopback redirect is awkward, mint a
+workspace-scoped token in the UI at:
+
+```
+https://<app_hostname>/workspaces/<workspace-id>/mcp
+```
+
+Send it as a bearer token. Tracecat verifies it directly, so no OAuth round trip happens
+at all. Tokens are scoped to one workspace and carry an expiry — prefer them over the
+browser flow for anything automated, and treat them like any other credential.
+
+## 4. Confirm
 
 ```bash
 claude mcp list
@@ -171,13 +124,8 @@ same thing and lists the tools.
 ## After a rebuild
 
 `terraform destroy && terraform apply`, or anything that replaces the instance, leaves
-every MCP client holding credentials that no longer mean anything. The endpoint URL does
-not change, so **the server definition is still correct** — do not remove and re-add it.
-Three things underneath it changed:
-
-- the Dex sign-in password (regenerated every boot),
-- the Dex client secret (regenerated every boot),
-- the OIDC proxy's dynamic client registrations, which are held in memory.
+clients holding credentials that no longer mean anything. The endpoint URL does not
+change, so **the server definition is still correct** — do not remove and re-add it.
 
 ```bash
 # 1. Recreate the Tracecat user — a rebuild empties Postgres, so /mcp will 401 without it.
@@ -190,18 +138,15 @@ claude mcp logout tracecat
 claude mcp login tracecat
 ```
 
+Personal access tokens do not survive either — they live in the database.
+
 > **Rebuild loops are limited by Let's Encrypt, not by Tracecat.** Nothing persists
 > Caddy's certificate storage, so every rebuild requests a new certificate for the same
 > name, against a limit of **5 duplicate certificates per registered domain per 168
 > hours**. Exhaust it and Caddy cannot serve HTTPS, so `/mcp` disappears entirely — and
 > the client-side symptom looks nothing like a certificate problem. If you expect more
 > than a handful of rebuild cycles on one hostname, use a different subdomain per cycle
-> or persist `/var/lib/docker/volumes/*caddy*`.
-
-Restarting the `dex` container alone has the same effect on tokens and none on the
-password: Dex uses in-memory storage, so sessions do not survive a restart, but the
-seeded credentials are only regenerated by the bootstrap. `claude mcp logout` then
-`login` is the fix there too.
+> or persist Caddy's data volume.
 
 ---
 
@@ -238,12 +183,12 @@ the MCP authorization spec discovers the server the same way:
 ```bash
 curl -s https://<app_hostname>/.well-known/oauth-protected-resource/mcp
 curl -s https://<app_hostname>/.well-known/oauth-authorization-server
-curl -s https://<app_hostname>/dex/.well-known/openid-configuration
+curl -s https://<app_hostname>/api/oauth/mcp/.well-known/openid-configuration
 ```
 
 The first names the authorization server, the second describes it (including a
-`registration_endpoint` — the proxy emulates dynamic client registration, so clients do
-not need a pre-registered client ID), and the third is Dex itself. If any of the three
-does not return JSON, the problem is on the server and
+`registration_endpoint` — the server emulates dynamic client registration, so clients do
+not need a pre-registered client ID), and the third is Tracecat's own issuer. If any of
+the three does not return JSON, the problem is on the server and
 [troubleshooting.md](troubleshooting.md#mcp-returns-502-but-everything-else-works) is the
 place to start.
