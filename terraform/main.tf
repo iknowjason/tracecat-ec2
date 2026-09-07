@@ -65,10 +65,10 @@ locals {
   ])
   acme_email = var.acme_email != null ? var.acme_email : var.superadmin_email
 
-  # Deploy Dex only when the MCP server is wanted and no external issuer was
-  # given. An explicit oidc_issuer always wins; Dex would just be an unused
-  # container and an open port.
-  builtin_idp = var.enable_mcp && var.oidc_issuer == null
+  # Images track the same tag the compose file was fetched from unless the
+  # operator deliberately splits them. Upstream's compose file carries its own
+  # hardcoded fallback, which is not always the tag you fetched it from.
+  image_tag = var.tracecat_image_tag != null ? var.tracecat_image_tag : var.tracecat_version
 
   # The address baked into Tracecat's .env at first boot.
   #
@@ -297,17 +297,9 @@ resource "aws_instance" "this" {
     app_host         = local.app_host
     bootstrap_gz_b64 = base64gzip(local.bootstrap_script)
 
-    # Empty string rather than null: these land in a shell file that the
-    # bootstrap sources, and "null" would be written literally.
-    oidc_issuer        = var.oidc_issuer == null ? "" : var.oidc_issuer
-    oidc_client_id     = var.oidc_client_id == null ? "" : var.oidc_client_id
-    oidc_client_secret = var.oidc_client_secret == null ? "" : var.oidc_client_secret
-    oidc_scopes        = var.oidc_scopes
-
-    builtin_idp   = local.builtin_idp ? "y" : "n"
-    mcp_idp_image = var.mcp_idp_image
-    enable_tls    = local.enable_tls ? "y" : "n"
-    acme_email    = local.acme_email
+    image_tag  = local.image_tag
+    enable_tls = local.enable_tls ? "y" : "n"
+    acme_email = local.acme_email
   }))
 
   # Replace the instance if the bootstrap configuration changes; cloud-init
@@ -315,26 +307,18 @@ resource "aws_instance" "this" {
   user_data_replace_on_change = true
 
   lifecycle {
-    # Catch a half-configured MCP setup at plan time. The bootstrap checks this
-    # too, but failing here costs nothing and saves a fifteen-minute install.
-    precondition {
-      condition = var.oidc_issuer == null || (
-        var.oidc_client_id != null && var.oidc_client_secret != null
-      )
-      error_message = "oidc_client_id and oidc_client_secret are both required when oidc_issuer is set. Leave all three unset to deploy without the MCP server."
-    }
-
-    # The MCP SDK validates its own issuer URL and rejects anything that is not
-    # https (localhost aside), so MCP over a bare IP cannot work whatever the
-    # identity provider is. Fail here rather than crash-loop the mcp container.
     precondition {
       condition     = var.hosted_zone_id == null || var.allocate_eip
       error_message = "hosted_zone_id needs allocate_eip, so the address exists before the A record is written. Without an Elastic IP, point app_hostname at the instance yourself."
     }
 
+    # The MCP SDK validates the issuer URL and rejects anything that is not
+    # https, localhost aside — and Tracecat's own issuer is built from the
+    # public API URL. So /mcp over a bare IP cannot work no matter who issues
+    # the tokens. Fail here rather than crash-loop the mcp container.
     precondition {
       condition     = !var.enable_mcp || var.app_hostname != null
-      error_message = "enable_mcp requires app_hostname: the MCP server refuses to start unless its issuer URL is https, which needs a DNS name and a certificate. Set app_hostname and hosted_zone_id, or set enable_mcp = false."
+      error_message = "enable_mcp requires app_hostname: the MCP server refuses an issuer URL that is not https, which needs a DNS name and a certificate. Set app_hostname and hosted_zone_id, or set enable_mcp = false."
     }
   }
 

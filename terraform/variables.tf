@@ -138,9 +138,36 @@ variable "superadmin_email" {
 }
 
 variable "tracecat_version" {
-  description = "Tracecat git tag to install. The bootstrap fetches env.sh, .env.example, Caddyfile and docker-compose.yml from this tag."
+  description = <<-DESC
+    Tracecat git tag to install. The bootstrap fetches env.sh, .env.example,
+    Caddyfile and docker-compose.yml from this tag, and pins the container
+    images to it unless tracecat_image_tag overrides that.
+
+    DO NOT "upgrade" this to "1.0.0". Upstream's tag names do not sort by date:
+    1.0.0 was cut 2026-04-03, four months BEFORE 1.0.0-beta.51 (2026-08-10), and
+    its own compose file defaults the images to 1.0.0-beta.37. At 1.0.0 the mcp
+    container is an OIDC proxy that needs an external identity provider; from
+    beta.51 Tracecat issues its own tokens and needs none. Check the commit date
+    of any tag before pinning it.
+  DESC
   type        = string
-  default     = "1.0.0"
+  default     = "1.0.0-beta.51"
+}
+
+variable "tracecat_image_tag" {
+  description = <<-DESC
+    Container image tag for the Tracecat services, written into .env as
+    TRACECAT__IMAGE_TAG. Leave null to track tracecat_version.
+
+    Upstream's docker-compose.yml interpolates $${TRACECAT__IMAGE_TAG} with a
+    hardcoded fallback, so without this the images come from whatever default
+    that file happened to ship with — which is not necessarily the tag the
+    compose file itself was fetched from. Setting it keeps code and images on
+    the same version. Override only to run a different image against a known
+    compose file.
+  DESC
+  type        = string
+  default     = null
 }
 
 variable "app_hostname" {
@@ -167,27 +194,20 @@ variable "app_hostname" {
 }
 
 # ── MCP server ───────────────────────────────────────────────────────────────
-# Tracecat's MCP container is an OIDC *proxy*: it forwards authorization to an
-# identity provider rather than issuing tokens itself, and refuses to start
-# without an issuer. Because docker-compose.yml sets `restart: on-failure:3` it
-# then crash-loops, and Caddy answers an empty-bodied 502 on /mcp while the rest
-# of the stack is perfectly healthy.
+# From 1.0.0-beta.51 the MCP server authenticates against an OIDC issuer that
+# Tracecat runs itself, on the API server at /api/oauth/mcp. The internal client
+# secret is derived from USER_AUTH_SECRET, which env.sh already generates, so
+# there is nothing to configure and no identity provider to deploy: bring the
+# stack up and /mcp works.
 #
-# It proxies via fastmcp's OIDCProxy, which registers ONE static client upstream
-# and emulates dynamic client registration towards MCP clients itself. So the
-# provider does not need to support DCR — any OIDC provider with a discovery
-# document will do.
+# Earlier tags (including 1.0.0 — see tracecat_version) required an external
+# provider, which is why this module used to deploy a Dex container. That is
+# gone. If you pin an older tag, /mcp will not start.
 #
-# By default this module deploys one: a Dex container alongside the stack, with
-# a generated client secret and a single seeded login. That is what makes /mcp
-# work out of the box. Set oidc_issuer to point at your own IdP instead.
-#
-# Why not Cognito, Okta or Auth0 by default: all three require callback URLs to
-# be https:// (only http://localhost is exempt), and this deploy serves plain
-# HTTP on an IP address. The MCP proxy's callback is
-# <public URL>/auth/callback, so a hosted IdP cannot register it until the
-# instance has a DNS name and a certificate. Dex accepts an http issuer, so it
-# works on the box as shipped.
+# Two ways to authenticate a client, both handled by Tracecat:
+#   - the browser OAuth flow, signing in as your Tracecat user;
+#   - a workspace-scoped personal access token, minted in the UI under
+#     /workspaces/<id>/mcp and sent as a bearer token.
 
 # ── TLS ──────────────────────────────────────────────────────────────────────
 # The MCP server refuses to start unless its own issuer URL is https. That check
@@ -220,87 +240,17 @@ variable "acme_email" {
 
 variable "enable_mcp" {
   description = <<-DESC
-    Deploy the built-in Dex identity provider so the MCP server starts and
-    http://<host>/mcp works without any external account.
+    Whether this deployment is expected to serve /mcp.
 
-    Dex is served through Caddy at /dex and its login is generated at boot; the
-    bootstrap prints the credentials and writes them to /etc/tracecat/READY.
+    Tracecat starts the mcp container either way — nothing here switches it off.
+    What this does is enforce, at plan time, the one prerequisite it has:
+    app_hostname must be set, because the MCP server refuses an issuer URL that
+    is not https and a bare IP cannot have a certificate.
 
-    Requires app_hostname: the MCP server will not start without an https
-    issuer, whichever provider supplies it.
-
-    Ignored when oidc_issuer is set — an explicit issuer always wins. Set this
-    false and leave oidc_issuer null to deploy without the MCP server at all.
+    Set false to deploy over plain HTTP and accept that /mcp will not work.
   DESC
   type        = bool
   default     = true
-}
-
-variable "mcp_idp_image" {
-  description = <<-DESC
-    Container image for the built-in Dex identity provider.
-
-    Pinned rather than :latest so a rebuild six months from now deploys what was
-    tested. Bump it deliberately.
-  DESC
-  type        = string
-  default     = "ghcr.io/dexidp/dex:v2.45.1"
-}
-
-variable "oidc_issuer" {
-  description = <<-DESC
-    External OIDC issuer URL for the MCP server, no trailing slash. For example
-    https://example.okta.com/oauth2/default or https://accounts.google.com.
-
-    Leave null to use the built-in Dex provider (see enable_mcp). Setting this
-    replaces Dex entirely and no Dex container is deployed.
-
-    The issuer must serve /.well-known/openid-configuration, the instance needs
-    outbound access to reach it, and the client registered there must allow
-    <public URL>/auth/callback as a redirect URI — which for a hosted IdP means
-    this instance needs a DNS name and TLS first.
-  DESC
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.oidc_issuer == null || can(regex("^https://[^/]+(/[^/]+)*$", var.oidc_issuer))
-    error_message = "oidc_issuer must be an https:// URL with no trailing slash."
-  }
-}
-
-variable "oidc_client_id" {
-  description = "OIDC client ID registered with the external issuer. Required when oidc_issuer is set; unused otherwise."
-  type        = string
-  default     = null
-}
-
-variable "oidc_client_secret" {
-  description = <<-DESC
-    OIDC client secret. Required when oidc_issuer is set.
-
-    SECURITY: this is written into the instance's user_data, which is not a
-    secret store. Anyone holding ec2:DescribeInstanceAttribute in this account
-    can read it back, as can any process on the instance that reaches IMDS —
-    including a compromised container. It is also recorded in Terraform state.
-
-    For anything past evaluation, leave this null and write the secret into
-    /opt/tracecat/.env by hand after the deploy. See docs/deploy.md.
-  DESC
-  type        = string
-  default     = null
-  sensitive   = true
-}
-
-variable "oidc_scopes" {
-  description = <<-DESC
-    Space-separated OIDC scopes requested by the MCP server.
-
-    The server appends offline_access itself so the IdP issues refresh tokens,
-    and retries once without it if the issuer rejects that scope.
-  DESC
-  type        = string
-  default     = "openid profile email"
 }
 
 variable "tags" {

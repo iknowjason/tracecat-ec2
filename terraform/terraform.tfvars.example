@@ -36,35 +36,30 @@ instance_type = "t3.xlarge"
 # Elastic IP first — Tracecat bakes this into PUBLIC_APP_URL at first boot.
 # app_hostname = "tracecat.example.com"
 
-# The MCP endpoint at http://<ip>/mcp is on by default.
+# The MCP endpoint is on by default and needs no identity provider.
 #
-# Tracecat's MCP container is an OIDC proxy and will not start without an
-# identity provider, so a Dex container is deployed alongside the stack with a
-# generated secret and one seeded login. Read the credentials afterwards with
-#   sudo grep ^mcp_ /etc/tracecat/READY
+# From Tracecat 1.0.0-beta.51 the MCP server authenticates against an OIDC
+# issuer Tracecat runs itself, with a client secret derived from a value env.sh
+# already generates. Sign in as your Tracecat user in the browser flow, or mint
+# a personal access token in the UI. Nothing to register anywhere.
 #
-# MCP REQUIRES TLS: the MCP server refuses to start unless its issuer URL is
-# https, so app_hostname and hosted_zone_id below are not optional if you want
-# /mcp. Port 80 then opens to the internet for the ACME challenge; 443 stays
-# restricted to allowed_cidrs.
+# MCP REQUIRES TLS: the server refuses an issuer URL that is not https, so
+# app_hostname and hosted_zone_id are not optional if you want /mcp. Port 80
+# then opens to the internet for the ACME challenge; 443 stays restricted to
+# allowed_cidrs.
 #
 # app_hostname   = "tracecat.example.com"
 # hosted_zone_id = "Z1234567890ABC"
 # acme_email     = "you@example.com"          # defaults to superadmin_email
 #
-# enable_mcp    = false                       # deploy without the MCP server
-# mcp_idp_image = "ghcr.io/dexidp/dex:v2.45.1"
+# enable_mcp = false    # deploy over plain HTTP and accept that /mcp will not work
+
+# Version pinning. tracecat_version selects the upstream tag the compose files
+# come from AND, unless you override it, the container images.
 #
-# To use your own identity provider instead, set all three of these and Dex is
-# not deployed at all. The provider must allow http://<ip>/auth/callback as a
-# redirect URI — which for a hosted IdP means giving this instance a DNS name
-# and TLS first, since Cognito, Okta and Auth0 all require https callbacks.
+# CAREFUL: upstream's tags do not sort by date. "1.0.0" was cut 2026-04-03, four
+# months BEFORE 1.0.0-beta.51, and it needs an external OIDC provider that this
+# module no longer deploys. Check a tag's commit date before pinning it.
 #
-# SECURITY: oidc_client_secret is written into the instance's user_data and into
-# Terraform state. The built-in Dex secret is generated on the instance instead
-# and never leaves it.
-#
-# oidc_issuer        = "https://example.okta.com/oauth2/default"
-# oidc_client_id     = "0oa1b2c3d4e5f6g7h8i9"
-# oidc_client_secret = "..."
-# oidc_scopes        = "openid profile email"
+# tracecat_version   = "1.0.0-beta.51"
+# tracecat_image_tag = "1.0.0-beta.52-rc.23"   # only to split images from files
