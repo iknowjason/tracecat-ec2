@@ -144,12 +144,25 @@ you are running a Tracecat older than `1.0.0-beta.51`, where the MCP server was 
 *proxy* that refused to start without an external identity provider. This module no
 longer deploys one, because from beta.51 Tracecat issues its own tokens.
 
-Upstream's tags do not sort by date. Check what you actually deployed:
+Upstream's tags do not sort by date. Check what is actually **running** — this needs no
+shell on the box, and reports the version of the image rather than the tag you asked for:
+
+```bash
+curl -s https://<app_hostname>/api/info
+# {"version":"1.0.0-beta.51","public_app_url":"https://...","auth_allowed_types":["basic"],...}
+```
+
+Anything below `1.0.0-beta.51` there explains the 502. Cross-check what the deploy
+intended:
 
 ```bash
 sudo grep -E '^tracecat_(version|image_tag)' /etc/tracecat/READY
 grep -E '^TRACECAT__IMAGE_TAG=' /opt/tracecat/.env
 ```
+
+A mismatch between `/api/info` and `TRACECAT__IMAGE_TAG` means the images did not come
+from where you thought — which is the failure mode this module now prevents by setting
+that variable explicitly.
 
 `1.0.0` was cut 2026-04-03, four months *before* `1.0.0-beta.51`, and its own compose file
 defaults the images to `1.0.0-beta.37`. Set `tracecat_version = "1.0.0-beta.51"` and

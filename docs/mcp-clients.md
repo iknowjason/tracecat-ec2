@@ -17,6 +17,68 @@ after a rebuild.
 
 ---
 
+## MCP setup
+
+Three steps, start to finish. Everything below this section is detail on why they work.
+
+### 1. Claim the superadmin account
+
+After `terraform apply` returns, the bootstrap keeps running for another 5-15 minutes.
+Wait for it, then open the UI:
+
+```bash
+terraform output app_url                   # https://<app_hostname>
+terraform output watch_bootstrap_command   # follow the install if you are impatient
+```
+
+Sign up with the **exact** address you set as `superadmin_email` and choose a password.
+Nothing is emailed — the stack has no SMTP — so this is an identity, not a mailbox.
+
+**Do this before touching the MCP client.** MCP authorises by matching the email claim
+against an existing Tracecat user, and that user is created by the sign-up form and
+nothing else. Skip it and you will authenticate successfully and still get a 401.
+
+### 2. Register the server with Claude Code
+
+```bash
+claude mcp add -t http tracecat https://<app_hostname>/mcp
+```
+
+`-t` is short for `--transport`. Use the hostname from `terraform output app_url` — the
+scheme must be `https`, since `/mcp` does not work without TLS.
+
+> Running against **Tracecat Cloud** instead of your own instance? Same command, their
+> endpoint: `claude mcp add -t http tracecat https://platform.tracecat.com/mcp`. Steps 1
+> and 3 are unchanged; only the URL differs.
+
+By default this registers the server for the current project. Add `-s user` to make it
+available in every directory.
+
+### 3. Sign in with OAuth
+
+```bash
+claude
+/mcp
+```
+
+`/mcp` opens the browser flow. Approve the client, then sign in with **your ordinary
+Tracecat credentials** — the same email and password you just chose in step 1. There is
+no second account and no separate password to look up.
+
+The flow finishes by redirecting to `http://localhost:<port>/callback`, which is your own
+client catching its token. When the page says the authentication is complete, close it;
+`/mcp` will show `tracecat` connected and list the tools.
+
+```bash
+claude mcp list     # tracecat: https://<host>/mcp (HTTP) - ✔ Connected
+```
+
+For a headless client — CI, a container, anywhere a browser redirect is awkward — skip
+step 3 and mint a personal access token instead. See
+[Personal access token](#personal-access-token-no-browser) below.
+
+---
+
 ## What the deploy gives you
 
 | | |
@@ -33,57 +95,38 @@ The one prerequisite is TLS. The MCP server refuses an issuer URL that is not ht
 Tracecat, so no configuration avoids it. `enable_mcp` enforces it at plan time: it
 requires `app_hostname`.
 
-## 1. Create the Tracecat account first
+## The details behind those three steps
 
-MCP authorises by matching the email claim against an **existing Tracecat user**, and
-that user is only created when someone completes the sign-up form. Until then you will
-authenticate successfully and still get **401**.
+### Scopes, and why not to define `tracecat` twice
 
-Open `https://<app_hostname>/`, sign up as `superadmin_email`, choose a password.
+`claude mcp add` writes to the current project by default; `-s user` makes the server
+available everywhere and `-s project` writes a checked-in `.mcp.json` for a team.
 
-## 2. Add the server
-
-```bash
-claude mcp add --transport http tracecat https://<app_hostname>/mcp
-```
-
-Scope matters. By default this writes to the current project; `-s user` makes it
-available everywhere, and `-s project` writes a checked-in `.mcp.json` for a team.
-
-> **Do not define the same server name in two scopes.** OAuth tokens are stored **per
-> endpoint**, so a `tracecat` at user scope pointing at an old host and another at project
-> scope pointing at the current one will authenticate independently. `claude mcp list`
-> reports this as a `[Conflicting scopes]` diagnostic. Remove the one you do not want with
-> `claude mcp remove tracecat -s user`.
-
-## 3. Authenticate
-
-Two ways in. Pick one.
-
-### Browser OAuth — sign in as yourself
-
-Start it with `/mcp` in a session, or:
+**Do not define the same server name in two scopes.** OAuth tokens are stored **per
+endpoint**, so a `tracecat` at user scope pointing at an old host and another at project
+scope pointing at the current one authenticate independently, and whichever the directory
+resolves to wins. `claude mcp list` reports this as a `[Conflicting scopes]` diagnostic.
+Remove the one you do not want:
 
 ```bash
-claude mcp login tracecat
+claude mcp remove tracecat -s user
 ```
 
-A browser opens, you approve the client, and you sign in with **your Tracecat
-credentials** — the same email and password you use for the UI. There is no second
-account and no separate password.
+### Browser OAuth — what the redirect is doing
 
-The flow ends by redirecting to `http://localhost:<port>/callback`. **That is correct** —
-loopback redirection is how native applications receive an authorization code
-([RFC 8252]), and your client is running a short-lived local listener to catch it.
+Step 3 ends by redirecting to `http://localhost:<port>/callback`. **That is correct.**
+Loopback redirection is how native applications receive an authorization code
+([RFC 8252]): Tracecat redirects to a short-lived listener your own client is running.
+Nothing to reconfigure, and nothing to point at a public URL.
 
 - *"Authentication complete, you can close this window"* → done.
-- **Connection refused** → the flow was fine; the client's listener had already closed.
-  Causes: a long pause at the sign-in form, opening the link in a browser on a different
-  machine, or restarting the client mid-flow. Retry and finish promptly.
+- **Connection refused** → the flow was fine; the listener had already closed. Causes: a
+  long pause at the sign-in form, opening the link in a browser on a different machine
+  than the client, or restarting the client mid-flow. Retry and finish promptly.
 
 [RFC 8252]: https://datatracker.ietf.org/doc/html/rfc8252#section-7.3
 
-### Personal access token — no browser
+### Personal access token (no browser)
 
 For headless clients, CI, or anywhere the loopback redirect is awkward, mint a
 workspace-scoped token in the UI at:
@@ -95,17 +138,6 @@ https://<app_hostname>/workspaces/<workspace-id>/mcp
 Send it as a bearer token. Tracecat verifies it directly, so no OAuth round trip happens
 at all. Tokens are scoped to one workspace and carry an expiry — prefer them over the
 browser flow for anything automated, and treat them like any other credential.
-
-## 4. Confirm
-
-```bash
-claude mcp list
-```
-
-`tracecat: https://<host>/mcp (HTTP) - ✔ Connected`. Inside a session, `/mcp` shows the
-same thing and lists the tools.
-
----
 
 ## Command reference
 
