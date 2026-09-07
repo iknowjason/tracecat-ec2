@@ -5,8 +5,19 @@
 # Nothing in this file is required — every variable has a working default.
 # Copy it and change what you care about.
 
-# The first Tracecat user. You sign up with this exact address on first visit.
-# Defaults to admin@example.com if you leave it out.
+# The first Tracecat user — the account with full privileges.
+#
+# You claim it by signing up with this EXACT address the first time you open the
+# UI, choosing a password there. Nothing is emailed; the stack has no SMTP, so
+# this is an identity rather than a mailbox that must receive. Sign in with any
+# other address and you get an ordinary unprivileged account.
+#
+# Decide before the first apply: it is written into /opt/tracecat/.env at boot
+# and cloud-init only runs once, so changing it later replaces the instance and
+# takes the database with it. Defaults to admin@example.com.
+#
+# The same address is what MCP authorises against, and what acme_email falls
+# back to.
 # superadmin_email = "you@example.com"
 
 # Who may reach the UI. Leave this out entirely and Terraform looks up the
@@ -32,9 +43,31 @@ instance_type = "t3.xlarge"
 # enable_ssh = true
 # key_name   = "my-keypair"
 
-# Optional: serve on a hostname instead of the raw IP. Point DNS at the
-# Elastic IP first — Tracecat bakes this into PUBLIC_APP_URL at first boot.
-# app_hostname = "tracecat.example.com"
+# ── Serving on a domain, which /mcp requires ────────────────────────────────
+#
+# app_hostname is the FULLY QUALIFIED subdomain to serve on. hosted_zone_id is
+# the Route 53 zone that owns the domain ABOVE it — for tracecat.example.com
+# that is the zone for example.com. Set both and Terraform writes the A record
+# in the same apply, before Caddy's first ACME attempt.
+#
+# Find the zone id:
+#   aws route53 list-hosted-zones \
+#     --query "HostedZones[?Name=='example.com.'].{name:Name,id:Id,private:Config.PrivateZone}" \
+#     --output table
+#
+# It comes back as /hostedzone/Z1234567890ABC. Use the BARE Z... part. The zone
+# must be public, and the domain's nameservers must actually point at Route 53,
+# or Let's Encrypt cannot resolve the name.
+#
+# Your credentials need route53:GetHostedZone, ListResourceRecordSets,
+# ChangeResourceRecordSets and GetChange on that zone — see docs/deploy.md.
+#
+# Leave these out and Tracecat serves on the raw IP over plain HTTP; everything
+# works except /mcp.
+#
+# app_hostname   = "tracecat.example.com"
+# hosted_zone_id = "Z1234567890ABC"
+# acme_email     = "you@example.com"    # Let's Encrypt contact; defaults to superadmin_email
 
 # The MCP endpoint is on by default and needs no identity provider.
 #
@@ -47,10 +80,6 @@ instance_type = "t3.xlarge"
 # app_hostname and hosted_zone_id are not optional if you want /mcp. Port 80
 # then opens to the internet for the ACME challenge; 443 stays restricted to
 # allowed_cidrs.
-#
-# app_hostname   = "tracecat.example.com"
-# hosted_zone_id = "Z1234567890ABC"
-# acme_email     = "you@example.com"          # defaults to superadmin_email
 #
 # enable_mcp = false    # deploy over plain HTTP and accept that /mcp will not work
 

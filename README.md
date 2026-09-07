@@ -107,7 +107,8 @@ Full walkthrough: [docs/deploy.md](docs/deploy.md).
 | Permission to create EC2, VPC security groups, IAM roles and EIPs | The IAM role is only for SSM Session Manager |
 | A default VPC, **or** an existing VPC and public subnet | Pass `vpc_id` / `subnet_id` if you have no default VPC |
 | An email address | Becomes the Tracecat superadmin — the only required variable |
-| A DNS name you control, in Route 53 | Only for `/mcp`, which requires TLS. Set `app_hostname` and `hosted_zone_id` |
+| A **public** Route 53 hosted zone | Only for `/mcp`, which requires TLS. Set `app_hostname` to the subdomain and `hosted_zone_id` to the zone that owns the parent domain |
+| Route 53 permissions on those credentials | `GetHostedZone`, `ListResourceRecordSets`, `ChangeResourceRecordSets`, `GetChange` — see [docs/deploy.md](docs/deploy.md#iam-permissions) |
 | *Optional:* `sops` and `age` | To keep AWS credentials encrypted instead of exported — see [docs/secrets-sops.md](docs/secrets-sops.md) |
 
 ---

@@ -17,13 +17,131 @@ exporting them and run every command below as
 `sops exec-env secrets.enc.env 'terraform ...'` — see
 [secrets-sops.md](secrets-sops.md).
 
-You need permission to create EC2 instances, VPC security groups, IAM roles and
-instance profiles, and Elastic IPs. The IAM role this creates grants only
-`AmazonSSMManagedInstanceCore`, which is what makes shell access work without SSH.
-
 If your account has no default VPC, have a `vpc_id` and a **public** `subnet_id` ready —
 the subnet must route to an internet gateway, since the instance pulls container images
 on first boot.
+
+### A Route 53 hosted zone, if you want `/mcp`
+
+The MCP server refuses an issuer URL that is not https, so it needs a real DNS name and a
+certificate. That means a **domain you control, hosted in Route 53 in this account**. You
+do not need a whole domain to yourself — a subdomain of one you already have is the
+normal case, and this module writes a single A record into an existing zone.
+
+Everything except `/mcp` works fine on the raw IP with no domain at all. If you are only
+evaluating the UI and workflows, skip this and leave `app_hostname` unset.
+
+Find the zone ID for the domain you intend to use:
+
+```bash
+aws route53 list-hosted-zones \
+  --query "HostedZones[].{name:Name,id:Id,private:Config.PrivateZone}" --output table
+```
+
+The `Id` comes back as `/hostedzone/Z1234567890ABC`; **`hosted_zone_id` wants only the
+`Z...` part.** The zone must be **public** (`private: False`) — Let's Encrypt has to
+resolve the name from the internet.
+
+### IAM permissions
+
+The credentials Terraform runs as need EC2, VPC security group, IAM role and instance
+profile, Elastic IP, and — for the DNS record — Route 53 permissions. The IAM role this
+module *creates* for the instance is separate and grants only
+`AmazonSSMManagedInstanceCore`, which is what makes shell access work without SSH.
+
+**Quick path**, appropriate for a lab account you own:
+
+| Managed policy | For |
+|---|---|
+| `AmazonEC2FullAccess` | Instance, security group, Elastic IP, AMI lookup |
+| `IAMFullAccess` | The instance role and instance profile |
+| `AmazonRoute53FullAccess` | The A record — only if you set `hosted_zone_id` |
+| `AmazonSSMFullAccess` | Not used by Terraform; needed by *you* for the shell and Run Command outputs |
+
+**Least privilege.** The actions this module actually calls, if you would rather scope it
+down. Route 53 is the part people miss, so it is called out first:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Route53Record",
+      "Effect": "Allow",
+      "Action": [
+        "route53:GetHostedZone",
+        "route53:ListResourceRecordSets",
+        "route53:ChangeResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": [
+        "arn:aws:route53:::hostedzone/Z1234567890ABC",
+        "arn:aws:route53:::change/*"
+      ]
+    },
+    {
+      "Sid": "Route53Lookup",
+      "Effect": "Allow",
+      "Action": ["route53:ListHostedZones"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Compute",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:CreateTags",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:AllocateAddress",
+        "ec2:ReleaseAddress",
+        "ec2:AssociateAddress",
+        "ec2:DisassociateAddress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "InstanceRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:PassRole",
+        "iam:TagRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+> **This list is derived from the resources the module declares, not from an apply run
+> under exactly this policy.** EC2 and IAM in particular fail with unhelpful messages when
+> one action is missing. If a `plan` or `apply` dies on `UnauthorizedOperation` or
+> `AccessDenied`, the error names the action — add it. Replace `Z1234567890ABC` with your
+> own zone.
+
+Route 53 is a **global** service: those permissions are not region-scoped, and the
+`hostedzone/` ARN has no account or region segment.
 
 ## 2. Configure
 
@@ -33,8 +151,23 @@ cp terraform.tfvars.example terraform.tfvars
 ```
 
 **Nothing is required.** Every variable has a working default, so `terraform apply` runs
-without prompting and without a `terraform.tfvars` at all. Two of those defaults are
-worth a deliberate look before you apply.
+without prompting and without a `terraform.tfvars` at all — you get Tracecat on the raw
+IP, over plain HTTP, reachable only from your own address.
+
+For a deployment that also serves `/mcp`, `terraform.tfvars` ends up looking like this.
+Each line is explained below:
+
+```hcl
+# terraform/terraform.tfvars
+
+superadmin_email = "you@example.com"          # the first Tracecat user
+
+app_hostname     = "tracecat.example.com"     # the subdomain to serve on
+hosted_zone_id   = "Z1234567890ABC"           # the Route 53 zone that owns example.com
+acme_email       = "you@example.com"          # optional; defaults to superadmin_email
+
+aws_region       = "us-east-1"
+```
 
 ### Setting the superadmin email
 
@@ -70,6 +203,64 @@ terraform output superadmin_email
 > forces Terraform to replace the instance, taking the database with it. To change it on a
 > running instance, edit `TRACECAT__AUTH_SUPERADMIN_EMAIL` in `/opt/tracecat/.env` and run
 > `docker compose up -d` — see [operations.md](operations.md).
+
+### The DNS name and the subdomain
+
+Only needed if you want `/mcp`. Skip it and Tracecat serves on the instance's public IP
+over plain HTTP.
+
+Two variables, and they are a pair — set one without the other and you get a name that
+does not resolve, or a zone with nothing written into it:
+
+| Variable | What it is | Example |
+|---|---|---|
+| `app_hostname` | The **fully qualified** name to serve on, no scheme, no port, no trailing dot | `tracecat.example.com` |
+| `hosted_zone_id` | The Route 53 zone that owns the parent domain, `Z...` only | `Z1234567890ABC` |
+
+**Pick the subdomain first, then find the zone that owns it.** The hostname is the
+subdomain; the zone is the domain above it. For `tracecat.example.com` you want the zone
+for `example.com` — not a zone for `tracecat.example.com`, unless you have genuinely
+delegated one.
+
+```bash
+# The zone that owns the parent domain. Note the trailing dot in Name.
+aws route53 list-hosted-zones \
+  --query "HostedZones[?Name=='example.com.'].{name:Name,id:Id,private:Config.PrivateZone}" \
+  --output table
+```
+
+Then in `terraform.tfvars`:
+
+```hcl
+app_hostname   = "tracecat.example.com"
+hosted_zone_id = "Z1234567890ABC"      # NOT "/hostedzone/Z1234567890ABC"
+```
+
+Terraform writes the A record — TTL 60, pointing at the Elastic IP — in the **same apply**
+that creates the instance, so it exists before Caddy's first ACME attempt a few minutes
+later. Nothing to do by hand.
+
+Three ways this goes wrong:
+
+- **The `/hostedzone/` prefix.** `list-hosted-zones` returns `Id` as
+  `/hostedzone/Z1234567890ABC`. Strip it; `hosted_zone_id` wants the bare `Z...`.
+- **A private zone.** Let's Encrypt resolves the name from the public internet. A private
+  zone gets you a record nobody outside the VPC can see and an ACME failure that looks
+  like a Caddy problem.
+- **The domain is registered elsewhere and its nameservers still point there.** Having a
+  zone in Route 53 is not the same as the internet using it. Check:
+  ```bash
+  dig +short NS example.com
+  aws route53 get-hosted-zone --id Z1234567890ABC --query 'DelegationSet.NameServers'
+  ```
+  Those two lists must match.
+
+Leaving `hosted_zone_id` null with `app_hostname` set is legitimate — it means *"I will
+create the record myself"* — but the record has to exist and resolve **before** you apply,
+because the bootstrap does not wait for DNS.
+
+`acme_email` is the Let's Encrypt account contact and defaults to `superadmin_email`.
+Expiry notices go there.
 
 ### Who may reach the UI
 
