@@ -125,98 +125,57 @@ then `docker compose up -d`.
 
 ## `/mcp` returns 502 but everything else works
 
-The giveaway is that `http://<ip>/` answers 200 while `POST /mcp` returns a 502 with
+The giveaway is that `https://<host>/` answers 200 while `POST /mcp` returns a 502 with
 an empty body: Caddy is routing correctly and reporting that it cannot reach what it
 proxies to — the `mcp` container is not listening.
 
 ```bash
 docker compose logs mcp
-docker compose logs dex
 ```
 
-The error that matters:
+**By far the most likely cause is the version.** If you see
 
 ```
 ERROR __main__:main:48 - MCP server failed to start after maximum startup attempts
   {'attempts': 3, 'error': 'OIDC_ISSUER must be configured for the MCP server.'}
 ```
 
-The MCP server is an OIDC proxy and refuses to start without an issuer. It is not a
-routing problem, not memory, and restarting will not help.
+you are running a Tracecat older than `1.0.0-beta.51`, where the MCP server was an OIDC
+*proxy* that refused to start without an external identity provider. This module no
+longer deploys one, because from beta.51 Tracecat issues its own tokens.
 
-On a default deploy an issuer *is* configured — the built-in Dex provider — so this
-error means either `enable_mcp = false`, or Dex did not come up. Check what the deploy
-decided:
-
-```bash
-sudo grep ^mcp /etc/tracecat/READY
-grep -E '^(OIDC_|TRACECAT_MCP__)' /opt/tracecat/.env
-```
-
-If `mcp_configured=0` with `mcp_builtin_idp=1`, the bootstrap's own reachability check
-failed. Reproduce it:
+Upstream's tags do not sort by date. Check what you actually deployed:
 
 ```bash
-. /etc/tracecat/READY
-docker run --rm --add-host "$(echo "$mcp_issuer" | awk -F/ '{print $3}'):host-gateway" \
-  curlimages/curl:8.10.1 -fsS "$mcp_issuer/.well-known/openid-configuration"
+sudo grep -E '^tracecat_(version|image_tag)' /etc/tracecat/READY
+grep -E '^TRACECAT__IMAGE_TAG=' /opt/tracecat/.env
 ```
 
-That must return JSON whose `issuer` field is byte-identical to `$mcp_issuer`; fastmcp
-rejects any mismatch. If it times out, confirm Dex published its port
-(`docker compose ps dex`). If it returns a document with a different `issuer`, the
-instance's public address changed after the deploy — rebuild, or edit
-`/opt/tracecat/dex/config.yaml` and `.env` together and
-`docker compose up -d dex mcp`.
-
-## `dex` crash-loops on "permission denied" reading its config
-
-```
-error executing gomplate: ... readAll "/etc/dex/config.yaml":
-open etc/dex/config.yaml: permission denied
-```
-
-The dex image runs as uid 1001, and a bind mount keeps the host's ownership, so a
-config written root:root 0640 is unreadable to it. The bootstrap chowns the file to the
-uid it reads out of the image; if that step was skipped or the file was rewritten by
-hand, fix it in place:
-
-```bash
-sudo chown 1001:1001 /opt/tracecat/dex/config.yaml
-cd /opt/tracecat
-sudo docker compose up -d dex
-sudo docker compose up -d --force-recreate mcp
-```
-
-`mcp` needs the force-recreate because it exhausted `restart: on-failure:3` while dex was
-down and will otherwise stay stopped. Confirm afterwards:
-
-```bash
-. /etc/tracecat/READY
-curl -fsS "$mcp_issuer/.well-known/openid-configuration" | head -c 200
-```
-
-Note that this reproduces only on Linux. Docker Desktop on macOS virtualises bind-mount
-ownership, so the identical config mounted there starts fine.
+`1.0.0` was cut 2026-04-03, four months *before* `1.0.0-beta.51`, and its own compose file
+defaults the images to `1.0.0-beta.37`. Set `tracecat_version = "1.0.0-beta.51"` and
+re-apply — which replaces the instance, so take a database backup first.
 
 ## `mcp` logs "Issuer URL must be HTTPS"
 
-Not fixable by configuration. The MCP SDK validates its own issuer URL against RFC 8414
-and exempts only `localhost`, so `/mcp` cannot work over plain HTTP no matter which
-identity provider you use. Set `app_hostname` and `hosted_zone_id` and re-apply, or set
-`enable_mcp = false` to deploy without it.
-
-Check what the certificate is doing:
-
-```bash
-cd /opt/tracecat
-sudo docker compose logs caddy | grep -i "certificate\|acme\|error" | tail -20
+```
+MCP server failed to start ... {'error': 'Issuer URL must be HTTPS'}
 ```
 
-Caddy needs port 80 reachable from the internet for the ACME challenge and the name
-resolving to this instance. If it is re-issuing on every restart, the `caddy-data` volume
-is missing from `docker-compose.override.yml` — Let's Encrypt allows five identical
-certificates a week.
+The MCP server validates its own issuer URL and refuses anything that is not https. That
+check is in the MCP SDK (`mcp/server/auth/routes.py::validate_issuer_url`), is hard-coded
+per RFC 8414, and exempts only `localhost` — so it applies to Tracecat's own issuer too.
+There is no flag and no escape hatch.
+
+`enable_mcp` requires `app_hostname` for exactly this reason, and Terraform says so at
+plan time. If you reach this error you have edited `.env` by hand, or `PUBLIC_API_URL` is
+http:// when it should be https://:
+
+```bash
+grep -E '^(PUBLIC_APP_URL|PUBLIC_API_URL)=' /opt/tracecat/.env
+```
+
+Both must be `https://<app_hostname>...`. The bootstrap rewrites them, because `env.sh`
+can only emit `http://`.
 
 ## The UI loads but every action fails with "NetworkError"
 
@@ -253,43 +212,25 @@ then `docker compose restart caddy`.
 
 ## `/mcp` authenticates and then returns 401
 
-Sign-in at Dex succeeded but Tracecat does not know you. MCP authorises against an
-existing Tracecat user, matched on the email claim, and the account is only created when
-someone completes the sign-up form in the UI. Sign in at `http://<ip>/` as
-`superadmin_email` once, then retry. The two must be the same address:
+Sign-in succeeded but Tracecat does not know you. MCP authorises against an existing
+Tracecat user, matched on the email claim, and the account is only created when someone
+completes the sign-up form in the UI. Sign in at `https://<app_hostname>/` as
+`superadmin_email` once, then retry.
 
 ```bash
-sudo grep -E '^(superadmin_email|mcp_login_email)' /etc/tracecat/READY
+sudo grep ^superadmin_email /etc/tracecat/READY
 ```
 
-## The Dex sign-in rejects the password
-
-You reach a login form after authorizing the MCP client, type the password you use for
-the Tracecat UI, and it fails with no useful explanation.
-
-That form belongs to **Dex**, not Tracecat. Both accounts use the same email address and
-have different passwords:
-
-- the **Tracecat** password is whatever you chose in the UI sign-up form;
-- the **Dex** password is generated at first boot and stored only on the instance.
-
-```bash
-sudo grep ^mcp_ /etc/tracecat/READY
-```
-
-Dex has no access to Tracecat's user database, so the UI password can never work there.
-If `/etc/tracecat/READY` has no `mcp_` lines, the deploy did not use the built-in
-provider — check `mcp_builtin_idp` in the same file.
+A rebuild empties Postgres, so this comes back every time you replace the instance.
 
 ## The OAuth flow ends on a `localhost` page
 
 That is the flow working. Loopback redirection is how native applications receive an
-authorization code (RFC 8252): Dex redirects to `https://<host>/auth/callback`, the only
-URI it has registered, and the OIDC proxy then hands the code to the client's own
-short-lived local listener. Do not reconfigure Dex to point somewhere public.
+authorization code (RFC 8252): Tracecat redirects to the client's own short-lived local
+listener. Nothing to reconfigure.
 
 If the page reports **connection refused**, the listener had already closed before the
-browser got there. Common causes: a long pause at the Dex form, opening the link in a
+browser got there. Common causes: a long pause at the sign-in form, opening the link in a
 browser on a different machine than the client, or restarting the client mid-flow. Start
 over and finish promptly:
 
@@ -298,14 +239,16 @@ claude mcp logout tracecat
 claude mcp login tracecat
 ```
 
-See [mcp-clients.md](mcp-clients.md) for the full four-hop flow.
+For a headless client, skip the browser entirely and mint a personal access token at
+`https://<app_hostname>/workspaces/<workspace-id>/mcp`. See
+[mcp-clients.md](mcp-clients.md).
 
 ## MCP clients fail after a rebuild
 
 The endpoint URL is unchanged, so the client's server definition is still correct — but
-the Dex password, the Dex client secret and the OIDC proxy's in-memory client
-registrations were all regenerated. Clear the stored credentials rather than removing and
-re-adding the server:
+the internal OIDC client secret is re-derived from a freshly generated `USER_AUTH_SECRET`,
+and the client registrations the server held are gone with the old database. Clear the
+stored credentials rather than removing and re-adding the server:
 
 ```bash
 claude mcp logout tracecat
@@ -313,19 +256,24 @@ claude mcp login tracecat
 ```
 
 A rebuild also empties Postgres, so sign up in the UI as `superadmin_email` again first
-or you will hit the 401 above.
+or you will hit the 401 above. Personal access tokens live in that database too, so any
+you had minted are gone.
 
 ## MCP clients are signed out after a reboot
 
-Expected. Dex stores sessions in memory, so restarting that container or the instance
-invalidates every token. Run the client's OAuth flow again.
+Expected. Access tokens are short-lived and client registrations do not survive a
+replacement of the instance. Run the client's OAuth flow again:
 
-- **The MCP server advertises `localhost`.** `TRACECAT_MCP__BASE_URL` falls back to
-  `PUBLIC_URL` in the compose file, but `env.sh` sets `PUBLIC_APP_URL`. The bootstrap sets
-  it explicitly for this reason; if you regenerate `.env` by hand, set it yourself.
+```bash
+claude mcp logout tracecat
+claude mcp login tracecat
+```
+
+- **The MCP server advertises `localhost`.** `TRACECAT__PUBLIC_API_URL` is derived from
+  `PUBLIC_APP_URL`, and the internal OIDC issuer is built from it. If you regenerate
+  `.env` by hand, set both.
 - **A secret containing `$` is silently truncated.** Docker Compose interpolates `.env`,
-  so values must be single-quoted — `OIDC_CLIENT_SECRET='...'`. The bootstrap always
-  quotes; hand-edits often do not.
+  so values must be single-quoted. The bootstrap always quotes; hand-edits often do not.
 
 ## Containers being OOM-killed
 

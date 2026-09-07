@@ -29,37 +29,36 @@ The result is the stack Tracecat documents at
 roughly 15 containers: API, worker, executor, agent worker, agent executor, MCP server,
 UI, Caddy, two PostgreSQL instances, Temporal, MinIO and Redis.
 
-### The MCP server installs itself, identity provider included
+### The MCP server works out of the box — no identity provider
 
-Tracecat's `mcp` container is an OIDC **proxy** — it issues no tokens of its own and will
-not start without an identity provider to forward authorization to. Upstream leaves that
-to you. This module does it for you, so a default `apply` produces a **working,
-authenticated MCP endpoint with nothing to register anywhere**:
+From Tracecat `1.0.0-beta.51` the MCP server authenticates against an OIDC issuer
+Tracecat runs **itself**, on the API server at `/api/oauth/mcp`, with a client secret
+derived from a value `env.sh` already generates. There is nothing to register, nothing to
+configure, and no extra container. Two ways in, both Tracecat's own:
 
-- a **Dex** container deployed alongside the stack, served through Caddy at `/dex`;
-- an OIDC client and secret **generated on the instance** — never in Terraform state,
-  never in `user_data`;
-- one seeded sign-in, using your `superadmin_email` and a password written to
-  `/etc/tracecat/READY`;
-- the redirect URI pre-registered, and the discovery document verified from inside a
-  container before the bootstrap reports success.
+- **browser OAuth**, signing in with your ordinary Tracecat account;
+- **a workspace-scoped personal access token**, minted in the UI — no browser, right for
+  headless clients.
 
-It **requires TLS** — the MCP server rejects its own issuer URL unless it is https,
-whatever provider you choose — so `/mcp` needs `app_hostname` and `hosted_zone_id`, and
-Caddy takes a Let's Encrypt certificate on first boot.
+It **requires TLS** — the MCP server refuses an issuer URL that is not https — so `/mcp`
+needs `app_hostname` and `hosted_zone_id`, and Caddy takes a Let's Encrypt certificate on
+first boot.
 
 ```bash
-terraform output mcp_credentials_command   # read the generated sign-in over SSM
 claude mcp add --transport http tracecat https://<app_hostname>/mcp
+claude mcp login tracecat
 ```
 
 **Sign up in the UI first** — MCP authorises against an existing Tracecat user, so `/mcp`
-returns 401 until that account exists. Point your own provider at it with `oidc_issuer`,
-or turn the whole thing off with `enable_mcp = false`.
+returns 401 until that account exists.
 
-Client setup, the OAuth flow, and what to do after a rebuild:
-[docs/mcp-clients.md](docs/mcp-clients.md). Design rationale:
-[docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
+> **Mind the tag.** Upstream's tag names do not sort by date: `1.0.0` was cut 2026-04-03,
+> four months *before* `1.0.0-beta.51`, and needs an external identity provider this
+> module no longer deploys. `tracecat_version` defaults to `1.0.0-beta.51` and also pins
+> the container images.
+
+Client setup and the OAuth flow: [docs/mcp-clients.md](docs/mcp-clients.md). Design
+rationale: [docs/deploy.md](docs/deploy.md#5a-the-mcp-endpoint).
 
 ---
 

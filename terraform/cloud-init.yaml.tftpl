@@ -19,16 +19,10 @@ write_files:
       INSTALL_DIR=/opt/tracecat
       PRODUCTION_MODE=y
       POSTGRES_SSL=n
-      # Single-quoted: these are operator-supplied and may contain characters
-      # the shell would otherwise act on when the bootstrap sources this file.
-      OIDC_ISSUER='${oidc_issuer}'
-      OIDC_CLIENT_ID='${oidc_client_id}'
-      OIDC_CLIENT_SECRET='${oidc_client_secret}'
-      OIDC_SCOPES='${oidc_scopes}'
-      # Deploy the built-in Dex identity provider so /mcp works without an
-      # external account. Ignored when OIDC_ISSUER is set.
-      BUILTIN_IDP=${builtin_idp}
-      MCP_IDP_IMAGE=${mcp_idp_image}
+      # Pins the container images. Upstream's compose file interpolates this
+      # and falls back to a tag baked into that file, which is not always the
+      # tag the file itself came from.
+      TRACECAT_IMAGE_TAG=${image_tag}
       ENABLE_TLS=${enable_tls}
       ACME_EMAIL='${acme_email}'
 
