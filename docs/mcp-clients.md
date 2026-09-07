@@ -152,18 +152,28 @@ Personal access tokens do not survive either — they live in the database.
 
 ## What the server exposes
 
-Tools are namespaced by resource type. Every tool except `workspaces_list_workspaces`
-takes a `workspace_id`, so that is always the first call.
+Tool names are flat — `create_workflow`, not `workflows_create_workflow`. (Earlier
+releases namespaced them by resource type; if your client shows the prefixed names, you
+are on an older Tracecat.) Every tool except `list_workspaces` takes a `workspace_id`, so
+that is always the first call.
 
-| Namespace | Covers |
+| Area | Covers |
 |---|---|
-| `workspaces_*` | List workspaces. **List only** — workspaces are created in the UI |
-| `workflows_*` | Full lifecycle: create, validate, run as draft, publish, tags, folders, file import/export, webhook and case-trigger config |
-| `cases_*` | Case fields and tags |
-| `tables_*` | Create tables, insert and search rows, export CSV |
-| `variables_*`, `secrets_*` | Read workspace variables and secret **metadata** — secret values are never returned |
-| `integrations_*` | List configured integrations |
-| `agents_*` | Create and run agent presets |
+| Workspaces | `list_workspaces` — **list only**; workspaces are created in the UI |
+| Workflows | `create_workflow`, `edit_workflow`, `update_workflow`, `validate_workflow`, `publish_workflow`, `run_workflow`, executions, folders, tags, webhook and case-trigger config |
+| Actions and authoring | `list_actions`, `get_action_context`, `get_workflow_authoring_context`, template upload and validation |
+| Cases | `create_case`, `search_cases`, comments, tasks, tags, fields, dropdowns, events |
+| Tables | `create_table`, `insert_rows`, `update_rows`, `search_table_rows`, `export_csv`, column indexes |
+| Variables and secrets | `list_variables`, `get_variable`, `list_secrets_metadata`, `get_secret_metadata` — secret **values** are never returned |
+| Integrations | `list_integrations`, `sync_custom_registry` |
+| Agents | Presets (`create_agent_preset`, `run_agent_preset`, ...) and agent folders |
+| Skills | `list_skills`, `upload_skill`, `update_skill`, `publish_skill` |
+
+Two things about the workflow DSL that bite when an agent writes YAML for you: literals
+are `None`, not `null`, and there is **no inline comprehension syntax** in `${{ }}`
+expressions — list transformations go in a `core.script.run_python` action. Ask for
+`get_workflow_authoring_context` before authoring rather than guessing at schemas, and do
+not let an agent invent `tools.*` action names for integrations you have not configured.
 
 Prompts that exercise it usefully:
 
